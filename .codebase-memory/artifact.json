@@ -1,0 +1,11 @@
+{
+    "schema_version": 2,
+    "commit": "",
+    "indexed_at": "2026-08-19T20:02:11Z",
+    "project": "ohlr-duat-planning-tool",
+    "nodes": 267,
+    "edges": 578,
+    "original_size": 1900544,
+    "compressed_size": 74214,
+    "compression_level": 3
+}
