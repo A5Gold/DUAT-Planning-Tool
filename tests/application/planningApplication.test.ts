@@ -10,6 +10,7 @@ import {
 import {
   DomainMutationError,
   PlanningApplication,
+  PlanningEntityNotFoundError,
   type PlanningAggregateStore,
 } from "../../src/application/planningApplication";
 import type { PlanningContextSnapshot, VersionedPlanningAggregate } from "../../src/adapters/sqlite";
@@ -95,5 +96,20 @@ describe("PlanningApplication policy propagation", () => {
     expect(accepted.validation.issues).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ code: "S1_SUPPORT_NOT_ENABLED" })]),
     );
+  });
+
+  it("rejects mutations that target a missing work instead of silently saving", () => {
+    const app = application();
+    const snapshot = app.getWorkbench(date);
+
+    expect(() => app.updateWork({
+      date,
+      scenario: { kind: "main" },
+      expectedRevision: snapshot.revision,
+      workId: "missing-work",
+      patch: { projectCode: "P-404" },
+    })).toThrowError(PlanningEntityNotFoundError);
+
+    expect(app.getWorkbench(date).revision).toBe(snapshot.revision);
   });
 });

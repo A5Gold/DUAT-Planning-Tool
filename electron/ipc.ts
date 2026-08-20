@@ -13,6 +13,7 @@ import {
 import { assertIpcRequest, validateIpcResponse } from "../src/application/ipcValidation";
 import {
   DomainMutationError,
+  PlanningEntityNotFoundError,
   PlanningApplication,
   type PlanningAggregateStore,
 } from "../src/application/planningApplication";
@@ -111,6 +112,15 @@ function mapError(error: unknown): IpcError {
       message: error.message,
       expectedRevision: error.expectedRevision ?? 0,
       actualRevision: error.actualRevision ?? 0,
+    };
+  }
+  if (error instanceof PlanningEntityNotFoundError) {
+    return {
+      kind: "not-found",
+      code: "NOT_FOUND",
+      entity: error.entity,
+      id: error.id,
+      message: error.message,
     };
   }
   if (error instanceof ImportPipelineError) {

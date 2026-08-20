@@ -107,6 +107,31 @@ function selectedPlan(state: PlanningState, scenario: ScenarioRefDto): NightPlan
   return state.scenarios.find((item) => item.id === scenario.scenarioId)?.plan ?? state.main;
 }
 
+function selectedPlanOrThrow(state: PlanningState, scenario: ScenarioRefDto): NightPlan {
+  if (scenario.kind === "main") return state.main;
+  const selected = state.scenarios.find((item) => item.id === scenario.scenarioId);
+  if (!selected) throw new PlanningEntityNotFoundError("scenario", scenario.scenarioId);
+  return selected.plan;
+}
+
+function requireWork(plan: NightPlan, workId: string): Work {
+  const work = plan.works.find((item) => item.id === workId);
+  if (!work) throw new PlanningEntityNotFoundError("work", workId);
+  return work;
+}
+
+function requireLocation(work: Work, locationId: string): Location {
+  const location = work.locations.find((item) => item.id === locationId);
+  if (!location) throw new PlanningEntityNotFoundError("location", locationId);
+  return location;
+}
+
+function requireAssignment(plan: NightPlan, assignmentId: string): void {
+  if (!plan.assignments.some((item) => item.id === assignmentId)) {
+    throw new PlanningEntityNotFoundError("assignment", assignmentId);
+  }
+}
+
 function updateSelectedPlan(
   service: PlanningService,
   state: PlanningState,
@@ -189,9 +214,9 @@ export class PlanningApplication {
     const existing = this.store.loadContext(normalizedDate);
     if (existing) return { aggregate: existing, data: existing.data };
 
+    if (this.options.defaultData) this.store.savePlanningData?.(this.options.defaultData);
     const state = this.defaultState(normalizedDate);
     const saved = this.store.saveAggregate(state, null);
-    if (this.options.defaultData) this.store.savePlanningData?.(this.options.defaultData);
     const data = this.options.defaultData ?? {
       staff: this.store.getStaff(),
       qualifications: this.store.getStaff().flatMap((staff) =>
@@ -237,6 +262,7 @@ export class PlanningApplication {
 
   getWorkbench(date: ISODate, scenario: ScenarioRefDto = { kind: "main" }): WorkbenchSnapshotDto {
     const context = this.context(date);
+    selectedPlanOrThrow(context.aggregate.state, scenario);
     return this.snapshot(date, context.aggregate, context.data, scenario);
   }
 
@@ -246,7 +272,7 @@ export class PlanningApplication {
       ? this.validationOptions
       : { ...this.validationOptions, allowS1Support: request.allowS1Support };
     const service = new PlanningService(context.data, validationOptions);
-    const plan = selectedPlan(context.aggregate.state, request.scenario);
+    const plan = selectedPlanOrThrow(context.aggregate.state, request.scenario);
     const candidates = service.candidates(plan, request.target, validationOptions);
     return {
       revision: context.aggregate.revision,
@@ -265,10 +291,11 @@ export class PlanningApplication {
     }
     const validationOptions = this.optionsFor(request);
     const service = new PlanningService(context.data, validationOptions);
+    const selected = selectedPlanOrThrow(context.aggregate.state, request.scenario);
     const state = update(
       cloneState(context.aggregate.state),
       service,
-      selectedPlan(context.aggregate.state, request.scenario),
+      selected,
       validationOptions,
     );
     const saved = this.store.saveAggregate(state, request.expectedRevision);
@@ -281,38 +308,52 @@ export class PlanningApplication {
   }
 
   updateWork(request: UpdateWorkRequest): PlanningMutationDto {
-    return this.mutate(request, (state, _service) => updateSelectedPlan(_service, state, request.scenario, (plan) => ({
-      ...plan,
-      works: plan.works.map((work) => (work.id === request.workId ? { ...work, ...request.patch } as Work : work)),
-    })));
+    return this.mutate(request, (state, _service, plan) => {
+      requireWork(plan, request.workId);
+      return updateSelectedPlan(_service, state, request.scenario, (selected) => ({
+      ...selected,
+      works: selected.works.map((work) => (work.id === request.workId ? { ...work, ...request.patch } as Work : work)),
+      }));
+    });
   }
 
   addLocation(request: AddLocationRequest): PlanningMutationDto {
-    return this.mutate(request, (state, service) => updateSelectedPlan(service, state, request.scenario, (plan) => ({
-      ...plan,
-      works: plan.works.map((work) => (work.id === request.workId ? { ...work, locations: [...work.locations, request.location] } : work)),
-    })));
+    return this.mutate(request, (state, service, plan) => {
+      requireWork(plan, request.workId);
+      return updateSelectedPlan(service, state, request.scenario, (selected) => ({
+        ...selected,
+        works: selected.works.map((work) => (work.id === request.workId ? { ...work, locations: [...work.locations, request.location] } : work)),
+      }));
+    });
   }
 
   updateLocation(request: UpdateLocationRequest): PlanningMutationDto {
-    return this.mutate(request, (state, service) => updateSelectedPlan(service, state, request.scenario, (plan) => ({
-      ...plan,
-      works: plan.works.map((work) => work.id !== request.workId ? work : {
-        ...work,
-        locations: work.locations.map((location) => location.id === request.locationId ? applyLocationPatch(location, request.patch) : location),
-      }),
-    })));
+    return this.mutate(request, (state, service, plan) => {
+      const work = requireWork(plan, request.workId);
+      requireLocation(work, request.locationId);
+      return updateSelectedPlan(service, state, request.scenario, (selected) => ({
+        ...selected,
+        works: selected.works.map((item) => item.id !== request.workId ? item : {
+          ...item,
+          locations: item.locations.map((location) => location.id === request.locationId ? applyLocationPatch(location, request.patch) : location),
+        }),
+      }));
+    });
   }
 
   deleteLocation(request: DeleteLocationRequest): PlanningMutationDto {
-    return this.mutate(request, (state, service) => updateSelectedPlan(service, state, request.scenario, (plan) => ({
-      ...plan,
-      works: plan.works.map((work) => work.id !== request.workId ? work : {
-        ...work,
-        locations: work.locations.filter((location) => location.id !== request.locationId),
-      }),
-      assignments: plan.assignments.filter((assignment) => assignment.locationId !== request.locationId),
-    })));
+    return this.mutate(request, (state, service, plan) => {
+      const work = requireWork(plan, request.workId);
+      requireLocation(work, request.locationId);
+      return updateSelectedPlan(service, state, request.scenario, (selected) => ({
+        ...selected,
+        works: selected.works.map((item) => item.id !== request.workId ? item : {
+          ...item,
+          locations: item.locations.filter((location) => location.id !== request.locationId),
+        }),
+        assignments: selected.assignments.filter((assignment) => assignment.locationId !== request.locationId),
+      }));
+    });
   }
 
   addAssignment(request: AddAssignmentRequest): PlanningMutationDto {
@@ -332,27 +373,55 @@ export class PlanningApplication {
   }
 
   removeAssignment(request: RemoveAssignmentRequest): PlanningMutationDto {
-    return this.mutate(request, (state, service) => updateSelectedPlan(service, state, request.scenario, (plan) => service.removeAssignment(plan, request.assignmentId)));
+    return this.mutate(request, (state, service, plan) => {
+      requireAssignment(plan, request.assignmentId);
+      return updateSelectedPlan(service, state, request.scenario, (selected) => service.removeAssignment(selected, request.assignmentId));
+    });
   }
 
   createScenario(request: CreateScenarioRequest): PlanningMutationDto {
-    return this.mutate(request, (state, service) => service.createScenario(state, request.scenarioId, request.name, request.sourceScenario?.kind === "scenario" ? request.sourceScenario.scenarioId : "main", request.temporary ?? true));
+    return this.mutate(request, (state, service) => {
+      if (request.sourceScenario) selectedPlanOrThrow(state, request.sourceScenario);
+      return service.createScenario(state, request.scenarioId, request.name, request.sourceScenario?.kind === "scenario" ? request.sourceScenario.scenarioId : "main", request.temporary ?? true);
+    });
   }
 
   renameScenario(request: RenameScenarioRequest): PlanningMutationDto {
-    return this.mutate(request, (state, service) => service.renameScenario(state, request.scenarioId, request.name));
+    return this.mutate(request, (state, service) => {
+      selectedPlanOrThrow(state, { kind: "scenario", scenarioId: request.scenarioId });
+      return service.renameScenario(state, request.scenarioId, request.name);
+    });
   }
 
   deleteScenario(request: DeleteScenarioRequest): PlanningMutationDto {
-    return this.mutate(request, (state, service) => service.deleteScenario(state, request.scenarioId));
+    return this.mutate(request, (state, service) => {
+      selectedPlanOrThrow(state, { kind: "scenario", scenarioId: request.scenarioId });
+      return service.deleteScenario(state, request.scenarioId);
+    });
   }
 
   saveScenario(request: SaveScenarioRequest): PlanningMutationDto {
-    return this.mutate(request, (state) => ({ ...state, activeScenarioId: request.scenarioId }));
+    return this.mutate(request, (state) => {
+      selectedPlanOrThrow(state, { kind: "scenario", scenarioId: request.scenarioId });
+      return { ...state, activeScenarioId: request.scenarioId };
+    });
   }
 
   applyScenario(request: ApplyScenarioRequest): PlanningMutationDto {
-    return this.mutate(request, (state, service) => service.applyScenario(state, request.scenarioId));
+    return this.mutate(request, (state, service) => {
+      selectedPlanOrThrow(state, { kind: "scenario", scenarioId: request.scenarioId });
+      return service.applyScenario(state, request.scenarioId);
+    });
+  }
+}
+
+export class PlanningEntityNotFoundError extends Error {
+  constructor(
+    readonly entity: "night" | "work" | "location" | "assignment" | "scenario" | "import",
+    readonly id: string,
+  ) {
+    super(`找不到 ${entity}「${id}」。`);
+    this.name = "PlanningEntityNotFoundError";
   }
 }
 
