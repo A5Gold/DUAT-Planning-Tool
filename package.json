@@ -10,6 +10,8 @@
     "rebuild:native": "electron-rebuild -f -w better-sqlite3",
     "dev": "vite --host 127.0.0.1",
     "dev:electron": "electron-vite dev",
+    "start": "electron-vite preview",
+    "smoke:electron": "node scripts/run-with-electron-node.mjs scripts/electron-native-sqlite-smoke.mjs",
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "lint": "eslint . --ext .ts,.tsx",
