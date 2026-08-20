@@ -39,8 +39,11 @@ import {
   type ValidationIssue,
   type ValidationOptions,
   type Work,
+  type PlanningData,
 } from './domain/planning';
 import { createMockState, mockPlanningData } from './data/mockData';
+import { ImportWorkbench } from './components/ImportWorkbench';
+import type { IpcResult, PlanningMutationDto, WorkbenchSnapshotDto } from './application/ipcContract';
 
 const INITIAL_DATE = '2026-08-20';
 const WEEKDAY_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
@@ -97,6 +100,10 @@ function getAssignment(
   );
 }
 
+function staffForNumber(staff: readonly Staff[], staffNumber: string): Staff | undefined {
+  return staff.find((person) => person.staffNumber === staffNumber);
+}
+
 function issueFor(
   issues: readonly ValidationIssue[],
   workId: string,
@@ -122,11 +129,39 @@ function statusClass(status: string | undefined): string {
   return status === 'night-duty' || status === 'available' || !status ? 'available' : 'unavailable';
 }
 
+function stateFromSnapshot(snapshot: WorkbenchSnapshotDto): PlanningState {
+  return {
+    date: snapshot.date,
+    main: snapshot.main,
+    scenarios: snapshot.scenarios,
+    activeScenarioId: snapshot.selectedScenario.kind === 'main' ? 'main' : snapshot.selectedScenario.scenarioId,
+  };
+}
+
+function dataFromSnapshot(snapshot: WorkbenchSnapshotDto): PlanningData {
+  const staff = snapshot.personnel.map((person) => ({
+    ...person.staff,
+    qualifications: person.qualifications,
+  }));
+  return {
+    staff,
+    roster: snapshot.personnel.flatMap((person) => person.rosterStatus ? [{
+      date: snapshot.date,
+      staffNumber: person.staff.staffNumber,
+      status: person.rosterStatus,
+      reason: person.rosterReason,
+    }] : []),
+  };
+}
+
 function App() {
-  const service = useRef(new PlanningService(mockPlanningData)).current;
+  const [planningData, setPlanningData] = useState<PlanningData>(mockPlanningData);
+  const service = useMemo(() => new PlanningService(planningData), [planningData]);
   const [selectedDate, setSelectedDate] = useState<ISODate>(INITIAL_DATE);
   const [state, setState] = useState<PlanningState>(() => createMockState(INITIAL_DATE));
   const dateStates = useRef<Partial<Record<ISODate, PlanningState>>>({});
+  const revisions = useRef<Partial<Record<ISODate, number>>>({});
+  const mutationQueue = useRef(Promise.resolve());
   const [allowS1Support, setAllowS1Support] = useState(false);
   const [selectedStaffNumber, setSelectedStaffNumber] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -134,12 +169,59 @@ function App() {
   const [activeModule, setActiveModule] = useState('排工工作台');
   const [savedAt, setSavedAt] = useState<string | null>(null);
 
+  const ipcPlanning = typeof window !== 'undefined' ? window.ohlr?.planning : undefined;
+
+  const refreshFromIpc = async (date: ISODate, scenario: 'main' | string = 'main') => {
+    if (!ipcPlanning) return false;
+    const result = await ipcPlanning.getWorkbench({ date });
+    if (!result.ok) {
+      setNotice({ tone: 'error', text: result.error.message });
+      return false;
+    }
+    const snapshot = result.data.snapshot;
+    revisions.current[date] = snapshot.revision;
+    setPlanningData(dataFromSnapshot(snapshot));
+    const nextState = stateFromSnapshot({ ...snapshot, selectedScenario: scenario === 'main' ? { kind: 'main' } : { kind: 'scenario', scenarioId: scenario } });
+    dateStates.current[date] = nextState;
+    setState(nextState);
+    return true;
+  };
+
+  const enqueueIpcMutation = <T,>(
+    build: (expectedRevision: number) => Promise<IpcResult<T>>,
+    onSuccess?: (data: T) => void,
+  ) => {
+    if (!ipcPlanning) return;
+    mutationQueue.current = mutationQueue.current.then(async () => {
+      const expectedRevision = revisions.current[selectedDate] ?? 0;
+      const result = await build(expectedRevision);
+      if (!result.ok) {
+        setNotice({ tone: result.error.kind === 'domain' ? 'error' : 'warning', text: result.error.message });
+        if (result.error.kind === 'conflict') await refreshFromIpc(selectedDate, state.activeScenarioId);
+        return;
+      }
+      revisions.current[selectedDate] = (result.data as PlanningMutationDto).revision ?? expectedRevision;
+      onSuccess?.(result.data);
+    }).catch((error: unknown) => {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'IPC mutation failed。' });
+    });
+  };
+
+  useEffect(() => {
+    void refreshFromIpc(INITIAL_DATE);
+    // Initial IPC hydration is intentionally attempted once; browser review
+    // mode keeps the existing in-memory fixture when no preload is present.
+  }, []);
+
   useEffect(() => {
     dateStates.current[selectedDate] = state;
   }, [selectedDate, state]);
 
   const currentPlan = getCurrentPlan(state);
   const validationOptions: ValidationOptions = { allowS1Support };
+  const activeScenarioRef = state.activeScenarioId === 'main'
+    ? { kind: 'main' as const }
+    : { kind: 'scenario' as const, scenarioId: state.activeScenarioId };
   const report = useMemo(
     () => service.validatePlan(currentPlan, validationOptions),
     [currentPlan, allowS1Support, service],
@@ -162,6 +244,7 @@ function App() {
     });
     setSelectedStaffNumber(null);
     setNotice(null);
+    void refreshFromIpc(value);
   };
 
   const moveDate = (days: number) => {
@@ -182,12 +265,30 @@ function App() {
       return;
     }
     updateCurrentPlan(() => result.plan);
+    const assignment = { staffNumber, workId, role, ...(locationId ? { locationId } : {}) };
+    if (ipcPlanning) {
+      if (existing) {
+        enqueueIpcMutation(
+          (expectedRevision) => ipcPlanning.replaceAssignment({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, assignmentId: existing.id, assignment }),
+          (data) => setState(stateFromSnapshot(data.snapshot)),
+        );
+      } else {
+        enqueueIpcMutation(
+          (expectedRevision) => ipcPlanning.addAssignment({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, assignment }),
+          (data) => setState(stateFromSnapshot(data.snapshot)),
+        );
+      }
+    }
     setSelectedStaffNumber(null);
     setNotice({ tone: 'success', text: '已更新人員分配，資源狀態已自動重算。' });
   };
 
   const removePerson = (assignmentId: string) => {
     updateCurrentPlan((plan) => service.removeAssignment(plan, assignmentId));
+    enqueueIpcMutation(
+      (expectedRevision) => ipcPlanning!.removeAssignment({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, assignmentId }),
+      (data) => setState(stateFromSnapshot(data.snapshot)),
+    );
     setNotice({ tone: 'warning', text: '已移除分配，請留意相關 Location 的人數警示。' });
   };
 
@@ -196,6 +297,17 @@ function App() {
       ...plan,
       works: plan.works.map((work) => (work.id === workId ? { ...work, ...patch } : work)),
     }));
+    if (ipcPlanning) {
+      const { active, projectCode, type, jobDescription, remarks } = patch;
+      const workPatch = { active, projectCode, type, jobDescription, remarks };
+      const filteredPatch = Object.fromEntries(Object.entries(workPatch).filter(([, value]) => value !== undefined));
+      if (Object.keys(filteredPatch).length) {
+        enqueueIpcMutation(
+          (expectedRevision) => ipcPlanning.updateWork({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, workId, patch: filteredPatch }),
+          (data) => setState(stateFromSnapshot(data.snapshot)),
+        );
+      }
+    }
   };
 
   const updateLocation = (workId: string, locationId: string, patch: Partial<Location>) => {
@@ -207,6 +319,14 @@ function App() {
           : work,
       ),
     }));
+    if (ipcPlanning) {
+      const { locationName, isolationPoint, earthingPoint, minimumTotalHeadcount, demand } = patch;
+      const locationPatch = Object.fromEntries(Object.entries({ locationName, isolationPoint, earthingPoint, minimumTotalHeadcount, demand }).filter(([, value]) => value !== undefined));
+      enqueueIpcMutation(
+        (expectedRevision) => ipcPlanning.updateLocation({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, workId, locationId, patch: locationPatch }),
+        (data) => setState(stateFromSnapshot(data.snapshot)),
+      );
+    }
   };
 
   const addLocation = (work: Work) => {
@@ -215,7 +335,16 @@ function App() {
       locationName: `Location ${nextSequence}`,
       minimumTotalHeadcount: 2,
     });
-    updateWork(work.id, { locations: [...work.locations, location] });
+    updateCurrentPlan((plan) => ({
+      ...plan,
+      works: plan.works.map((item) => item.id === work.id ? { ...item, locations: [...item.locations, location] } : item),
+    }));
+    if (ipcPlanning) {
+      enqueueIpcMutation(
+        (expectedRevision) => ipcPlanning.addLocation({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, workId: work.id, location }),
+        (data) => setState(stateFromSnapshot(data.snapshot)),
+      );
+    }
     setNotice({ tone: 'success', text: `已新增 Location ${nextSequence}。` });
   };
 
@@ -227,12 +356,31 @@ function App() {
       ),
       assignments: plan.assignments.filter((assignment) => assignment.locationId !== location.id),
     }));
+    if (ipcPlanning) {
+      enqueueIpcMutation(
+        (expectedRevision) => ipcPlanning.deleteLocation({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, workId: work.id, locationId: location.id }),
+        (data) => setState(stateFromSnapshot(data.snapshot)),
+      );
+    }
     setNotice({ tone: 'warning', text: `已刪除 ${location.locationName || 'Location'}，相關 AP/CP 分配已移除。` });
   };
 
   const activateWork = (work: Work) => {
     const location = createLocation(`${work.id}:location-1`, 1, { locationName: '新 Location' });
-    updateWork(work.id, { active: true, projectCode: '', locations: [location] });
+    updateCurrentPlan((plan) => ({
+      ...plan,
+      works: plan.works.map((item) => item.id === work.id ? { ...item, active: true, projectCode: '', locations: [location] } : item),
+    }));
+    if (ipcPlanning) {
+      enqueueIpcMutation(
+        (expectedRevision) => ipcPlanning.updateWork({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, workId: work.id, patch: { active: true, projectCode: '' } }),
+        (data) => setState(stateFromSnapshot(data.snapshot)),
+      );
+      enqueueIpcMutation(
+        (expectedRevision) => ipcPlanning.addLocation({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, workId: work.id, location }),
+        (data) => setState(stateFromSnapshot(data.snapshot)),
+      );
+    }
     setNotice({ tone: 'success', text: `已啟用 Work ${work.slot}，請輸入 Project Code。` });
   };
 
@@ -241,12 +389,25 @@ function App() {
       (letter) => !state.scenarios.some((scenario) => scenario.name === `測試方案 ${letter}`),
     );
     if (!nextLetter) return;
-    setState((previous) => service.createScenario(previous, `scenario-${nextLetter.toLowerCase()}`, `測試方案 ${nextLetter}`, 'main'));
+    const scenarioId = `scenario-${nextLetter.toLowerCase()}`;
+    setState((previous) => service.createScenario(previous, scenarioId, `測試方案 ${nextLetter}`, 'main'));
+    if (ipcPlanning) {
+      enqueueIpcMutation(
+        (expectedRevision) => ipcPlanning.createScenario({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, scenarioId, name: `測試方案 ${nextLetter}`, sourceScenario: { kind: 'main' }, temporary: true }),
+        (data) => setState(stateFromSnapshot(data.snapshot)),
+      );
+    }
     setNotice({ tone: 'success', text: `已建立${`測試方案 ${nextLetter}`}，尚未套用至主要方案。` });
   };
 
   const deleteScenario = (scenarioId: string) => {
     setState((previous) => service.deleteScenario(previous, scenarioId));
+    if (ipcPlanning) {
+      enqueueIpcMutation(
+        (expectedRevision) => ipcPlanning.deleteScenario({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, scenarioId }),
+        (data) => setState(stateFromSnapshot(data.snapshot)),
+      );
+    }
     setNotice({ tone: 'warning', text: '測試方案已刪除，主要方案沒有變更。' });
   };
 
@@ -254,7 +415,14 @@ function App() {
     const scenario = state.scenarios.find((item) => item.id === scenarioId);
     const nextName = window.prompt('重新命名測試方案', scenario?.name ?? '測試方案');
     if (!nextName?.trim()) return;
-    setState((previous) => service.renameScenario(previous, scenarioId, nextName.trim()));
+    const name = nextName.trim();
+    setState((previous) => service.renameScenario(previous, scenarioId, name));
+    if (ipcPlanning) {
+      enqueueIpcMutation(
+        (expectedRevision) => ipcPlanning.renameScenario({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, scenarioId, name }),
+        (data) => setState(stateFromSnapshot(data.snapshot)),
+      );
+    }
   };
 
   const saveScenario = () => {
@@ -263,6 +431,12 @@ function App() {
       return;
     }
     setSavedAt(new Date().toLocaleTimeString('zh-Hant-HK', { hour: '2-digit', minute: '2-digit' }));
+    if (ipcPlanning && state.activeScenarioId !== 'main') {
+      enqueueIpcMutation(
+        (expectedRevision) => ipcPlanning.saveScenario({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, scenarioId: state.activeScenarioId }),
+        (data) => setState(stateFromSnapshot(data.snapshot)),
+      );
+    }
     setNotice({ tone: 'success', text: '測試方案已暫存於本機工作階段。' });
   };
 
@@ -270,6 +444,12 @@ function App() {
     if (state.activeScenarioId === 'main') return;
     const scenarioName = state.scenarios.find((item) => item.id === state.activeScenarioId)?.name ?? '測試方案';
     setState((previous) => service.applyScenario(previous, previous.activeScenarioId));
+    if (ipcPlanning) {
+      enqueueIpcMutation(
+        (expectedRevision) => ipcPlanning.applyScenario({ date: selectedDate, scenario: activeScenarioRef, expectedRevision, allowS1Support, scenarioId: state.activeScenarioId }),
+        (data) => setState(stateFromSnapshot(data.snapshot)),
+      );
+    }
     setNotice({ tone: 'success', text: `${scenarioName} 已明確套用至主要方案。` });
   };
 
@@ -341,7 +521,7 @@ function App() {
           ))}
           <div className="side-nav-label lower">DATA</div>
           {['資料匯入', '報告與備份'].map((label) => (
-            <button type="button" className="side-nav-item" key={label} onClick={() => setActiveModule(label)}>
+            <button type="button" className={`side-nav-item ${activeModule === label ? 'active' : ''}`} key={label} onClick={() => setActiveModule(label)}>
               <span className="nav-icon"><ArrowSync20Regular /></span>
               <span>{label}</span>
             </button>
@@ -399,13 +579,14 @@ function App() {
             </MessageBar>
           )}
 
-          <div className="planning-layout">
+          {activeModule === '資料匯入' ? <ImportWorkbench date={selectedDate} expectedRevision={revisions.current[selectedDate] ?? 0} onNotice={(tone, text) => setNotice({ tone, text })} onSnapshot={(snapshot) => { revisions.current[selectedDate] = snapshot.revision; setPlanningData(dataFromSnapshot(snapshot)); setState(stateFromSnapshot(snapshot)); }} /> : <div className="planning-layout">
             <main className="work-area" aria-label="Work 排工區">
               <div className="work-columns">
                 {currentPlan.works.map((work) => (
                   <WorkCard
                     key={work.id}
                     work={work}
+                    staff={planningData.staff}
                     assignments={currentPlan.assignments}
                     issues={report.issues}
                     onWorkChange={updateWork}
@@ -424,14 +605,14 @@ function App() {
 
             <aside className="people-sidebar" aria-label="當晚可用人員">
               <div className="people-header">
-                <div className="people-title"><PeopleTeam20Regular /><strong>當晚可用人員</strong><Badge appearance="tint">{mockPlanningData.staff.length}</Badge></div>
+                <div className="people-title"><PeopleTeam20Regular /><strong>當晚可用人員</strong><Badge appearance="tint">{planningData.staff.length}</Badge></div>
                 <span>拖放到 AP / CP 或一般員工 row</span>
                 <Input size="small" value={search} onChange={(_, data) => setSearch(data.value)} contentBefore={<Search20Regular />} placeholder="搜尋姓名或 staff no." aria-label="搜尋人員" />
                 <Switch checked={allowS1Support} onChange={(_, data) => setAllowS1Support(data.checked)} label="啟用 S1 支援" />
               </div>
               <div className="people-scroll">
                 {TEAM_ORDER.map((team) => {
-                  const members = mockPlanningData.staff.filter((person) => person.team === team && `${person.name} ${person.staffNumber}`.toLowerCase().includes(search.toLowerCase()));
+                  const members = planningData.staff.filter((person) => person.team === team && `${person.name} ${person.staffNumber}`.toLowerCase().includes(search.toLowerCase()));
                   if (!members.length) return null;
                   return (
                     <section className={`team-group ${team === 'S1' ? 'support-team' : ''}`} key={team}>
@@ -467,16 +648,17 @@ function App() {
                 })}
               </div>
             </aside>
-          </div>
+          </div>}
         </section>
       </div>
-      <footer className="status-footer"><span><span className="status-dot green" />Local data only</span><span>Roster: {selectedDate}</span><span>Formation 29 · Qualification 2026-08-18</span></footer>
+      <footer className="status-footer"><span><span className="status-dot green" />Local data only</span><span>Roster: {selectedDate}</span><span>Formation {planningData.staff.length} · Qualification {planningData.qualifications?.length ?? 0}</span></footer>
     </div>
   );
 }
 
 interface WorkCardProps {
   work: Work;
+  staff: readonly Staff[];
   assignments: readonly Assignment[];
   issues: readonly ValidationIssue[];
   selectedStaffNumber: string | null;
@@ -492,6 +674,7 @@ interface WorkCardProps {
 
 function WorkCard({
   work,
+  staff,
   assignments,
   issues,
   selectedStaffNumber,
@@ -544,6 +727,7 @@ function WorkCard({
                 key={location.id}
                 work={work}
                 location={location}
+                staff={staff}
                 assignments={assignments}
                 issues={issues}
                 selectedStaffNumber={selectedStaffNumber}
@@ -578,7 +762,7 @@ function WorkCard({
           <div className="general-heading"><strong>一般員工</strong><span>Work 層級分配</span><Badge appearance="outline">已派 {generalAssignments.length} / 建議 {generalNeeded}</Badge></div>
           <div className="crew-chips">
             {generalAssignments.map((assignment) => {
-              const person = mockPlanningData.staff.find((item) => item.staffNumber === assignment.staffNumber);
+              const person = staffForNumber(staff, assignment.staffNumber);
               return <button type="button" className="crew-chip" key={assignment.id} onClick={(event) => { event.stopPropagation(); onRemove(assignment.id); }} title="移除一般員工分配">{person?.name ?? assignment.staffNumber}<Dismiss20Regular /></button>;
             })}
             {!generalAssignments.length && <span className="empty-drop">拖放一般員工到此處</span>}
@@ -598,6 +782,7 @@ function WorkCard({
 interface LocationRowProps {
   work: Work;
   location: Location;
+  staff: readonly Staff[];
   assignments: readonly Assignment[];
   issues: readonly ValidationIssue[];
   selectedStaffNumber: string | null;
@@ -611,6 +796,7 @@ interface LocationRowProps {
 function LocationRow({
   work,
   location,
+  staff,
   assignments,
   issues,
   selectedStaffNumber,
@@ -626,7 +812,7 @@ function LocationRow({
   const cpIssue = issueFor(issues, work.id, location.id, 'CP');
   const personLabel = (assignment: Assignment | undefined) => {
     if (!assignment) return null;
-    const person = mockPlanningData.staff.find((item) => item.staffNumber === assignment.staffNumber);
+    const person = staffForNumber(staff, assignment.staffNumber);
     return person ? `${person.name} · ${person.team}` : assignment.staffNumber;
   };
 

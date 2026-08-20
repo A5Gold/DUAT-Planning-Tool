@@ -1,7 +1,11 @@
 /// <reference types="vite/client" />
 
-interface Window {
-  ohlr?: {
-    health: () => Promise<{ ok: boolean; runtime: string }>;
-  };
+import type { OhlrApi } from './application/ipcContract';
+
+declare global {
+  interface Window {
+    ohlr?: OhlrApi;
+  }
 }
+
+export {};

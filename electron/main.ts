@@ -1,7 +1,11 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
-import { join } from 'node:path';
+import { app, BrowserWindow } from 'electron';
+import { dirname, join } from 'node:path';
+import { createSqliteDatabase, SqlitePlanningRepository } from '../src/adapters/sqlite';
+import { createMockState, mockPlanningData } from '../src/data/mockData';
+import { createMainIpcRuntime, registerIpcHandlers } from './ipc';
 
 let mainWindow: BrowserWindow | null = null;
+let database: ReturnType<typeof createSqliteDatabase> | null = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -26,7 +30,17 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  ipcMain.handle('app:health', () => ({ ok: true, runtime: 'electron' }));
+  const dataRoot = app.isPackaged
+    ? join(dirname(process.execPath), 'data')
+    : join(app.getPath('userData'), 'data');
+  database = createSqliteDatabase(join(dataRoot, 'ohlr-duat.sqlite'));
+  const repository = new SqlitePlanningRepository(database);
+  if (repository.getStaff().length === 0) repository.savePlanningData(mockPlanningData);
+  const runtime = createMainIpcRuntime(database);
+  // Fresh installs start with the vertical-slice fixture until the first Excel
+  // commit replaces Formation and Qualification context.
+  if (!repository.loadAggregate('2026-08-20')) repository.saveAggregate(createMockState('2026-08-20'), null);
+  registerIpcHandlers(runtime);
   createWindow();
 
   app.on('activate', () => {
@@ -36,4 +50,9 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  database?.close();
+  database = null;
 });
