@@ -1,6 +1,6 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import ExcelJS from "exceljs";
 import { describe, expect, it } from "vitest";
 
@@ -12,13 +12,16 @@ import {
   previewImportFromSnapshot,
 } from "../../src/application/import";
 
-const formationPath = resolve(process.cwd(), "00 Reference Document/Team Member/Team Formation.xlsx");
-const qualificationPath = resolve(process.cwd(), "00 Reference Document/Qualification/Qualification.xlsx");
-
 describe("Excel staging pipeline", () => {
   it("selects the Formation worksheet and carries blank Team cells forward", async () => {
-    const reader = new ExcelJsWorkbookReader();
-    const snapshot = await reader.read(formationPath);
+    const snapshot = await fixtureWorkbook({
+      formationSheetName: "Team Formation",
+      formationRows: [
+        ["S1", 673706, "SM Yeung", "Y", "Y"],
+        [null, 100001, "Staff 1", "Y", "Y"],
+        ...Array.from({ length: 27 }, (_, index) => ["S2", 100002 + index, `Staff ${index + 2}`, "Y", "Y"]),
+      ],
+    });
     const preview = previewImportFromSnapshot(snapshot, "formation");
 
     expect(preview.status).toBe("valid");
@@ -32,10 +35,23 @@ describe("Excel staging pipeline", () => {
   });
 
   it("selects Qualification by latest Update on, ignores the legend, and excludes Sup. by default", async () => {
-    const reader = new ExcelJsWorkbookReader();
-    const snapshot = await reader.read(qualificationPath);
-    const formation = await reader.read(formationPath);
-    const formationPreview = previewImportFromSnapshot(formation, "formation");
+    const regularStaff = [517968, ...Array.from({ length: 28 }, (_, index) => 100001 + index)];
+    const snapshot = await fixtureWorkbook({
+      formationSheetName: "Team Formation",
+      qualificationSheetName: "工作表1",
+      formationRows: regularStaff.map((staffNumber, index) => ["S2", staffNumber, staffNumber === 517968 ? "Mak Yui Fai" : `Staff ${index}`, "Y", "Y"]),
+      qualificationRows: [
+        ["S2", 517968, "Mak Yui Fai", new Date("2026-10-28"), "--"],
+        [null, 100001, "Staff 1", "2026-08-19 (legacy)", "--"],
+        [null, 100002, "Staff 2", new Date("2026-08-18"), "--"],
+        ...regularStaff.slice(3).map((staffNumber, index) => [null, staffNumber, `Staff ${index + 3}`, new Date("2027-01-01"), "--"]),
+        ["Sup.", 200001, "Supervisor 1", new Date("2027-01-01"), "--"],
+        [null, 200002, "Supervisor 2", new Date("2027-01-01"), "--"],
+        [null, 200003, "Supervisor 3", new Date("2027-01-01"), "--"],
+        [null, 200004, "Supervisor 4", new Date("2027-01-01"), "--"],
+      ],
+    });
+    const formationPreview = previewImportFromSnapshot(snapshot, "formation");
     const knownStaffNumbers = new Set(
       formationPreview.rows.flatMap((row) => row.normalized ? [row.normalized.staffNumber] : []),
     );
@@ -139,17 +155,19 @@ class SnapshotReader {
 }
 
 async function fixtureWorkbook(input: {
+  formationSheetName?: string;
+  qualificationSheetName?: string;
   formationRows?: readonly (readonly unknown[])[];
   qualificationRows?: readonly (readonly unknown[])[];
 }) {
   const workbook = new ExcelJS.Workbook();
   if (input.formationRows) {
-    const sheet = workbook.addWorksheet("Formation");
+    const sheet = workbook.addWorksheet(input.formationSheetName ?? "Formation");
     sheet.addRow(["Team", "Staff number", "Name", "AP", "CP"]);
     for (const row of input.formationRows) sheet.addRow([...row]);
   }
   if (input.qualificationRows) {
-    const sheet = workbook.addWorksheet("Qualification");
+    const sheet = workbook.addWorksheet(input.qualificationSheetName ?? "Qualification");
     sheet.getCell("A1").value = "Update on :";
     sheet.getCell("D1").value = new Date("2026-08-18");
     sheet.addRow([]);

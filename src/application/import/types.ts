@@ -1,6 +1,6 @@
 import type { Team } from "../../domain/planning";
 
-export type ExcelImportKind = "formation" | "qualification";
+export type ExcelImportKind = "formation" | "qualification" | "roster" | "job-role-record";
 export type ImportIssueSeverity = "error" | "warning";
 export type ImportRowStatus = "valid" | "warning" | "invalid" | "ignored";
 export type ImportDisposition = "include" | "exclude" | "requires_action";
@@ -31,7 +31,10 @@ export type ImportIssueCode =
   | "SUPERVISOR_REMARK_REQUIRED"
   | "STAFF_NAME_MISMATCH"
   | "TEAM_MISMATCH"
-  | "QUALIFICATION_EXPIRED";
+  | "QUALIFICATION_EXPIRED"
+  | "UNKNOWN_ROSTER_CODE"
+  | "UNRESOLVED_STAFF_NAME"
+  | "JOB_ROLE_HEADER_MISSING";
 
 export interface ImportSource {
   filePath?: string;
@@ -86,7 +89,35 @@ export interface QualificationStagedRow {
   observations: readonly QualificationObservation[];
 }
 
-export type StagedRowValue = FormationStagedRow | QualificationStagedRow;
+export interface RosterStagedRow {
+  staffNumber: string;
+  displayName?: string;
+  sourceTeam?: string;
+  grade?: string;
+  isSupervisor?: boolean;
+  date: string;
+  rawCode: string;
+  status: "available" | "night-duty" | "unavailable" | "leave" | "sickness" | "training" | "day-duty" | "unknown";
+  available: boolean;
+  reason?: string;
+}
+
+export type JobRoleRecordRole = "AP" | "CP(P)" | "CP(T)" | "SPC" | "HSM" | "LOM";
+
+export interface JobRoleRecordStagedRow {
+  workDate: string;
+  tn: string;
+  line: string;
+  workNature: string;
+  timeIndicator: string;
+  role: JobRoleRecordRole;
+  rawStaffName: string;
+  staffNumber?: string;
+  matchStatus: "matched" | "unresolved" | "non-person";
+  remark?: string;
+}
+
+export type StagedRowValue = FormationStagedRow | QualificationStagedRow | RosterStagedRow | JobRoleRecordStagedRow;
 
 export interface ImportStagingRow<T extends StagedRowValue = StagedRowValue> {
   id: string;
@@ -106,6 +137,7 @@ export interface WorksheetDescriptor {
   updateOn?: string;
   hasFormationHeader: boolean;
   hasQualificationHeader: boolean;
+  hasJobRoleHeader?: boolean;
 }
 
 export interface ImportPreview<T extends StagedRowValue = StagedRowValue> {
@@ -159,6 +191,22 @@ export interface FormationCommitPort {
   ): Promise<ImportBatchReceipt> | ImportBatchReceipt;
 }
 
+export interface RosterCommitPort {
+  commitRoster(
+    rows: readonly RosterStagedRow[],
+    preview: ImportPreview<RosterStagedRow>,
+    context: ImportCommitContext,
+  ): Promise<ImportBatchReceipt> | ImportBatchReceipt;
+}
+
+export interface JobRoleRecordCommitPort {
+  commitJobRoleRecords(
+    rows: readonly JobRoleRecordStagedRow[],
+    preview: ImportPreview<JobRoleRecordStagedRow>,
+    context: ImportCommitContext,
+  ): Promise<ImportBatchReceipt> | ImportBatchReceipt;
+}
+
 export interface QualificationCommitPort {
   commitQualification(
     rows: readonly QualificationStagedRow[],
@@ -170,5 +218,7 @@ export interface QualificationCommitPort {
 export interface InMemoryImportState {
   formation: readonly FormationStagedRow[];
   qualification: readonly QualificationStagedRow[];
+  roster?: readonly RosterStagedRow[];
+  jobRoleRecords?: readonly JobRoleRecordStagedRow[];
   batches: readonly ImportBatchReceipt[];
 }

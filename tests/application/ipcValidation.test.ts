@@ -56,6 +56,33 @@ describe("typed IPC channel contract", () => {
     expect(validateIpcRequest("app:health", {})).toMatchObject({ ok: false });
   });
 
+  it("accepts import preview rows without an unresolved staff number", () => {
+    const response: IpcResult<{ preview: unknown }> = {
+      ok: true,
+      data: {
+        preview: {
+          importId: "job-role-record:test:Sheet1",
+          kind: "job-role-record",
+          source: { filePath: "C:/tmp/roles.xlsx", worksheetName: "Sheet1" },
+          selectedWorksheet: "Sheet1",
+          status: "has-warnings",
+          rowCount: 1,
+          validRowCount: 1,
+          warningCount: 1,
+          errorCount: 0,
+          rows: [{
+            rowNumber: 4,
+            status: "warning",
+            values: { rawStaffName: "Unresolved", matchStatus: "unresolved" },
+            issues: [{ rowNumber: 4, severity: "warning", code: "UNRESOLVED_STAFF_NAME", message: "legacy candidate" }],
+          }],
+          issues: [],
+        },
+      },
+    };
+    expect(validateIpcResponse("import:preview", response).ok).toBe(true);
+  });
+
   it("rejects unknown fields and invalid expectedRevision before main loads state", () => {
     const unknownField = validateIpcRequest("planning:update-work", {
       ...mutationEnvelope({ workId: "night:work-1", patch: { remarks: "updated" } }),

@@ -177,7 +177,7 @@ function personnelForSnapshot(
     const assignment = plan.assignments.find((item) => item.staffNumber === staff.staffNumber);
     const work = assignment ? plan.works.find((item) => item.id === assignment.workId) : undefined;
     const available = roster
-      ? roster.available === false || ["unavailable", "leave", "sickness", "training", "day-duty"].includes(roster.status ?? "")
+      ? roster.available === false || ["unavailable", "leave", "sickness", "training", "day-duty", "unknown"].includes(roster.status ?? "")
         ? "unavailable"
         : "available"
       : "unknown";

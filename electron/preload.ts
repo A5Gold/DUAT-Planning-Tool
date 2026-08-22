@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { IPC_CHANNELS, type OhlrApi, type IpcChannel, type IpcRequest, type IpcResponse } from '../src/application/ipcContract';
 
 function invoke<C extends IpcChannel>(channel: C, request: IpcRequest<C>): Promise<IpcResponse<C>> {
@@ -26,6 +26,7 @@ const imports = {
   preview: (request: IpcRequest<'import:preview'>) => invoke(IPC_CHANNELS.previewImport, request),
   selectFile: (request: IpcRequest<'import:select-file'>) => invoke(IPC_CHANNELS.selectImportFile, request),
   commit: (request: IpcRequest<'import:commit'>) => invoke(IPC_CHANNELS.commitImport, request),
+  getPathForFile: (file: File) => webUtils.getPathForFile(file),
 };
 
 const api = {

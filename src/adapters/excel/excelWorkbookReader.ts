@@ -20,6 +20,7 @@ export interface ExcelWorksheetSnapshot {
   rowCount: number;
   columnCount: number;
   rows: readonly (readonly ExcelCell[])[];
+  mergedRanges?: readonly string[];
 }
 
 export interface ExcelWorkbookSnapshot {
@@ -80,7 +81,8 @@ function worksheetSnapshot(worksheet: ExcelJS.Worksheet, index: number): ExcelWo
     }
     rows.push(cells);
   }
-  return { index, name: worksheet.name, rowCount, columnCount, rows };
+  const model = worksheet.model as unknown as { merges?: string[] };
+  return { index, name: worksheet.name, rowCount, columnCount, rows, mergedRanges: [...(model.merges ?? [])] };
 }
 
 export class ExcelJsWorkbookReader implements ExcelWorkbookReader {

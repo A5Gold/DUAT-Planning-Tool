@@ -57,7 +57,7 @@ export class IpcValidationError extends Error {
 type UnknownRecord = Record<string, unknown>;
 type Validator = (value: unknown, path: string) => FieldValidationIssue[];
 
-const IMPORT_KINDS = new Set<ImportKind>(["formation", "qualification", "roster"]);
+const IMPORT_KINDS = new Set<ImportKind>(["formation", "qualification", "roster", "job-role-record"]);
 const TEAMS = new Set(["S1", "S2", "S3", "S4", "S5"]);
 const WORK_TYPES = new Set(["Possession", "PA Work"]);
 const ASSIGNMENT_ROLES = new Set(["AP", "CP", "一般員工"]);
@@ -70,6 +70,7 @@ const ROSTER_STATUS = new Set([
   "sickness",
   "training",
   "day-duty",
+  "unknown",
 ]);
 const VALIDATION_SEVERITIES = new Set(["error", "warning"]);
 const VALIDATION_CODES = new Set([
@@ -309,7 +310,7 @@ function validateWork(value: unknown, path: string): FieldValidationIssue[] {
     (object, childPath) => [
       ...stringValue(object.id, `${childPath}.id`),
       ...integerValue(object.slot, `${childPath}.slot`, 1),
-      ...(typeof object.slot === "number" && object.slot > 4 ? [issue(`${childPath}.slot`, "must be between 1 and 4")] : []),
+      ...(typeof object.slot === "number" && object.slot > 5 ? [issue(`${childPath}.slot`, "must be between 1 and 5")] : []),
       ...booleanValue(object.active, `${childPath}.active`),
       ...stringValue(object.projectCode, `${childPath}.projectCode`, false),
       ...enumValue(object.type, `${childPath}.type`, WORK_TYPES),
@@ -356,7 +357,7 @@ function validateNightPlan(value: unknown, path: string): FieldValidationIssue[]
       ...arrayValue(object.assignments, `${childPath}.assignments`, validateAssignment),
     ];
     if (Array.isArray(object.works)) {
-      if (object.works.length !== 4) issues.push(issue(`${childPath}.works`, "must contain exactly four Work slots"));
+      if (object.works.length !== 5) issues.push(issue(`${childPath}.works`, "must contain exactly five Work slots"));
       const slots = object.works.map((work) => (isRecord(work) ? work.slot : undefined));
       if (new Set(slots).size !== slots.length) issues.push(issue(`${childPath}.works`, "Work slots must be unique"));
     }
@@ -427,8 +428,8 @@ function validatePersonnelAvailability(value: unknown, path: string): FieldValid
     ...(hasOwn(object, "currentWorkId") ? stringValue(object.currentWorkId, `${childPath}.currentWorkId`) : []),
     ...(hasOwn(object, "currentWorkSlot")
       ? integerValue(object.currentWorkSlot, `${childPath}.currentWorkSlot`, 1).concat(
-          typeof object.currentWorkSlot === "number" && object.currentWorkSlot > 4
-            ? [issue(`${childPath}.currentWorkSlot`, "must be between 1 and 4")]
+          typeof object.currentWorkSlot === "number" && object.currentWorkSlot > 5
+            ? [issue(`${childPath}.currentWorkSlot`, "must be between 1 and 5")]
             : [],
         )
       : []),

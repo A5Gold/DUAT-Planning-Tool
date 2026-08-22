@@ -41,7 +41,7 @@ import {
   type Work,
   type PlanningData,
 } from './domain/planning';
-import { createMockState, mockPlanningData } from './data/mockData';
+import { createMockState } from './data/mockData';
 import { ImportWorkbench } from './components/ImportWorkbench';
 import type { IpcResult, PlanningMutationDto, WorkbenchSnapshotDto } from './application/ipcContract';
 
@@ -84,6 +84,23 @@ function getCurrentPlan(state: PlanningState): NightPlan {
   return state.scenarios.find((scenario) => scenario.id === state.activeScenarioId)?.plan ?? state.main;
 }
 
+/** Offline/browser review starts from an empty projection; source facts must come from IPC/import. */
+function createEmptyState(date: ISODate): PlanningState {
+  const seed = createMockState(date);
+  const emptyPlan = {
+    ...seed.main,
+    works: seed.main.works.map((work) => ({
+      ...work,
+      active: work.slot <= 2,
+      projectCode: '',
+      locations: work.slot <= 2 ? [createLocation(`${work.id}:location-1`, 1, { locationName: `Location ${work.slot}` })] : [],
+      assignments: [],
+    })),
+    assignments: [],
+  };
+  return { ...seed, main: emptyPlan, scenarios: [], activeScenarioId: 'main' };
+}
+
 function staffForAssignment(assignments: readonly Assignment[], staffNumber: string): Assignment | undefined {
   return assignments.find((assignment) => assignment.staffNumber === staffNumber);
 }
@@ -117,16 +134,23 @@ function issueFor(
 
 function availabilityLabel(status: string | undefined): string {
   if (status === 'night-duty') return '夜更';
+  if (status === 'available') return '可用';
   if (status === 'day-duty') return '非夜更';
   if (status === 'leave') return '休假';
   if (status === 'sickness') return '病假';
   if (status === 'training') return '培訓';
   if (status === 'unavailable') return '不可用';
-  return '可選';
+  return '未確認';
 }
 
 function statusClass(status: string | undefined): string {
-  return status === 'night-duty' || status === 'available' || !status ? 'available' : 'unavailable';
+  if (status === 'night-duty' || status === 'available') return 'available';
+  if (!status) return 'unknown';
+  return 'unavailable';
+}
+
+function isRosterAvailable(status: string | undefined): boolean {
+  return status === 'night-duty' || status === 'available';
 }
 
 function stateFromSnapshot(snapshot: WorkbenchSnapshotDto): PlanningState {
@@ -145,6 +169,7 @@ function dataFromSnapshot(snapshot: WorkbenchSnapshotDto): PlanningData {
   }));
   return {
     staff,
+    qualifications: snapshot.personnel.flatMap((person) => person.qualifications.map((qualification) => ({ ...qualification, staffNumber: person.staff.staffNumber }))),
     roster: snapshot.personnel.flatMap((person) => person.rosterStatus ? [{
       date: snapshot.date,
       staffNumber: person.staff.staffNumber,
@@ -155,10 +180,10 @@ function dataFromSnapshot(snapshot: WorkbenchSnapshotDto): PlanningData {
 }
 
 function App() {
-  const [planningData, setPlanningData] = useState<PlanningData>(mockPlanningData);
+  const [planningData, setPlanningData] = useState<PlanningData>({ staff: [], roster: [] });
   const service = useMemo(() => new PlanningService(planningData), [planningData]);
   const [selectedDate, setSelectedDate] = useState<ISODate>(INITIAL_DATE);
-  const [state, setState] = useState<PlanningState>(() => createMockState(INITIAL_DATE));
+  const [state, setState] = useState<PlanningState>(() => createEmptyState(INITIAL_DATE));
   const dateStates = useRef<Partial<Record<ISODate, PlanningState>>>({});
   const revisions = useRef<Partial<Record<ISODate, number>>>({});
   const mutationQueue = useRef(Promise.resolve());
@@ -168,6 +193,7 @@ function App() {
   const [notice, setNotice] = useState<{ tone: 'success' | 'error' | 'warning'; text: string } | null>(null);
   const [activeModule, setActiveModule] = useState('排工工作台');
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [reservedStaff, setReservedStaff] = useState<Set<string>>(new Set());
 
   const ipcPlanning = typeof window !== 'undefined' ? window.ohlr?.planning : undefined;
 
@@ -238,7 +264,7 @@ function App() {
     setSelectedDate(value);
     setState((previous) => {
       dateStates.current[selectedDate] = previous;
-      const nextState = dateStates.current[value] ?? createMockState(value);
+      const nextState = dateStates.current[value] ?? createEmptyState(value);
       dateStates.current[value] = nextState;
       return nextState;
     });
@@ -384,6 +410,15 @@ function App() {
     setNotice({ tone: 'success', text: `已啟用 Work ${work.slot}，請輸入 Project Code。` });
   };
 
+  const addWork = () => {
+    const next = currentPlan.works.find((work) => !work.active);
+    if (!next) {
+      setNotice({ tone: 'warning', text: '每晚最多安排 5 個 Work。請先調整現有 Work。' });
+      return;
+    }
+    activateWork(next);
+  };
+
   const createScenario = () => {
     const nextLetter = ['A', 'B', 'C'].find(
       (letter) => !state.scenarios.some((scenario) => scenario.name === `測試方案 ${letter}`),
@@ -466,7 +501,7 @@ function App() {
       date.setDate(start.getDate() + index);
       const value = isoDate(date);
       const dayPlan = value === selectedDate ? currentPlan : null;
-      const activeWorkCount = dayPlan?.works.filter((work) => work.active).length ?? (index === 6 ? 0 : 1);
+      const activeWorkCount = dayPlan?.works.filter((work) => work.active).length;
       return { label, value, date: date.getDate(), activeWorkCount };
     });
   }, [selectedDate, currentPlan]);
@@ -538,8 +573,8 @@ function App() {
                 className={`day-tile ${day.value === selectedDate ? 'selected' : ''} ${day.activeWorkCount === 0 ? 'rest' : ''}`}
                 onClick={() => resetDate(day.value)}
               >
-                <span className="day-top"><strong>{day.label}</strong><small>{day.date}</small><em>{day.activeWorkCount ? `${day.activeWorkCount} Work` : '休息日'}</em></span>
-                <span className="day-code">{day.value === selectedDate ? currentPlan.works.filter((work) => work.active).map((work) => work.projectCode || '未輸入').join(' + ') || '未安排' : day.activeWorkCount ? '已安排' : '未安排'}</span>
+                <span className="day-top"><strong>{day.label}</strong><small>{day.date}</small><em>{day.value === selectedDate ? (day.activeWorkCount ? `${day.activeWorkCount} Work` : '未安排') : '未載入'}</em></span>
+                <span className="day-code">{day.value === selectedDate ? currentPlan.works.filter((work) => work.active).map((work) => work.projectCode || '未輸入').join(' + ') || '未安排' : '選取日期以載入'}</span>
               </button>
             ))}
           </div>
@@ -550,7 +585,7 @@ function App() {
                 <strong>{selectedDate} 夜間工作安排</strong>
                 <span>S2、S4、S5 夜更，S1 可選支援</span>
               </div>
-              <Badge appearance="outline">一晚最多 4 個 Work</Badge>
+              <Badge appearance="outline">已安排 {currentPlan.works.filter((work) => work.active).length} / 5 個 Work</Badge>
             </div>
             <div className="scenario-tabs" role="tablist" aria-label="Scenarios">
               <button type="button" className={`scenario-tab ${state.activeScenarioId === 'main' ? 'active' : ''}`} onClick={() => setState((previous) => service.switchScenario(previous, 'main'))}>主要方案</button>
@@ -565,6 +600,7 @@ function App() {
               <Button appearance="subtle" icon={<Add20Regular />} onClick={createScenario} disabled={state.scenarios.length >= 3}>新增測試方案</Button>
             </div>
             <div className="scenario-actions">
+              <Button appearance="secondary" icon={<Add20Regular />} onClick={addWork}>新增 Work</Button>
               <span className={`auto-status ${report.issues.length ? 'bad' : 'good'}`}><span className="status-dot" />{report.issues.length ? `自動檢查 · ${report.issues.length} 項待處理` : '自動檢查 · 可行'}</span>
               {state.activeScenarioId !== 'main' && <span className="temporary-label">暫存測試{savedAt ? ` ${savedAt}` : ''}</span>}
               {state.activeScenarioId !== 'main' && <Button appearance="secondary" className="temporary-save-button" icon={<Save20Regular />} onClick={saveScenario}>暫存此方案</Button>}
@@ -579,10 +615,10 @@ function App() {
             </MessageBar>
           )}
 
-          {activeModule === '資料匯入' ? <ImportWorkbench date={selectedDate} expectedRevision={revisions.current[selectedDate] ?? 0} onNotice={(tone, text) => setNotice({ tone, text })} onSnapshot={(snapshot) => { revisions.current[selectedDate] = snapshot.revision; setPlanningData(dataFromSnapshot(snapshot)); setState(stateFromSnapshot(snapshot)); }} /> : <div className="planning-layout">
+          {activeModule === '資料匯入' ? <ImportWorkbench date={selectedDate} expectedRevision={revisions.current[selectedDate] ?? 0} onNotice={(tone, text) => setNotice({ tone, text })} onSnapshot={(snapshot) => { revisions.current[selectedDate] = snapshot.revision; setPlanningData(dataFromSnapshot(snapshot)); setState(stateFromSnapshot(snapshot)); }} /> : activeModule === '排工工作台' ? <div className="planning-layout">
             <main className="work-area" aria-label="Work 排工區">
               <div className="work-columns">
-                {currentPlan.works.map((work) => (
+                {currentPlan.works.filter((work, index, works) => work.active || index === works.findIndex((item) => !item.active)).map((work) => (
                   <WorkCard
                     key={work.id}
                     work={work}
@@ -606,11 +642,19 @@ function App() {
             <aside className="people-sidebar" aria-label="當晚可用人員">
               <div className="people-header">
                 <div className="people-title"><PeopleTeam20Regular /><strong>當晚可用人員</strong><Badge appearance="tint">{planningData.staff.length}</Badge></div>
+                <div className="capacity-summary" aria-label="當晚人力統計">
+                  <span><strong>{planningData.staff.filter((person) => isRosterAvailable(service.getRosterEntry(selectedDate, person.staffNumber)?.status)).length}</strong> 可用</span>
+                  <span><strong>{planningData.staff.filter((person) => person.qualifications?.length).length}</strong> 合資格</span>
+                  <span><strong>{new Set(currentPlan.assignments.map((assignment) => assignment.staffNumber)).size}</strong> 已派</span>
+                  <span><strong>{reservedStaff.size}</strong> 保留</span>
+                  <span><strong>{Math.max(0, planningData.staff.filter((person) => isRosterAvailable(service.getRosterEntry(selectedDate, person.staffNumber)?.status)).length - new Set(currentPlan.assignments.map((assignment) => assignment.staffNumber)).size - reservedStaff.size)}</strong> 剩餘</span>
+                </div>
                 <span>拖放到 AP / CP 或一般員工 row</span>
                 <Input size="small" value={search} onChange={(_, data) => setSearch(data.value)} contentBefore={<Search20Regular />} placeholder="搜尋姓名或 staff no." aria-label="搜尋人員" />
                 <Switch checked={allowS1Support} onChange={(_, data) => setAllowS1Support(data.checked)} label="啟用 S1 支援" />
               </div>
               <div className="people-scroll">
+                {!planningData.staff.length && <div className="empty-people"><strong>尚未匯入人員</strong><span>先匯入 Formation、Qualification，再匯入當月 Roster，這裡才會列出可排工人員。</span><Button appearance="primary" icon={<ArrowSync20Regular />} onClick={() => setActiveModule('資料匯入')}>前往資料匯入</Button></div>}
                 {TEAM_ORDER.map((team) => {
                   const members = planningData.staff.filter((person) => person.team === team && `${person.name} ${person.staffNumber}`.toLowerCase().includes(search.toLowerCase()));
                   if (!members.length) return null;
@@ -629,11 +673,11 @@ function App() {
                         const qualifications = ['AP', 'CP(P)', 'CP(T)'].filter((type) => service.isQualificationValid(person.staffNumber, type as 'AP' | 'CP(P)' | 'CP(T)', selectedDate));
                         const hasExpired = person.qualifications?.some((item) => ['AP', 'CP(P)', 'CP(T)'].includes(item.type) && item.expiryDate < selectedDate);
                         return (
+                          <div className={`person-row-wrap ${reservedStaff.has(person.staffNumber) ? 'reserved' : ''}`} key={person.staffNumber}>
                           <button
                             type="button"
-                            className={`person-row ${statusClass(roster?.status)} ${isSelected ? 'selected' : ''} ${isS1Locked || roster?.status === 'day-duty' ? 'locked' : ''}`}
-                            key={person.staffNumber}
-                            draggable={!isS1Locked && roster?.status !== 'day-duty'}
+                            className={`person-row ${statusClass(roster?.status)} ${isSelected ? 'selected' : ''} ${isS1Locked || !isRosterAvailable(roster?.status) ? 'locked' : ''}`}
+                            draggable={!isS1Locked && isRosterAvailable(roster?.status)}
                             onClick={() => setSelectedStaffNumber(isSelected ? null : person.staffNumber)}
                             onDragStart={(event) => event.dataTransfer.setData('application/x-ohlr-person', person.staffNumber)}
                             aria-label={`${person.name} ${person.team} ${availability}${assignmentLabel ? ` · ${assignmentLabel}` : ''}`}
@@ -641,6 +685,8 @@ function App() {
                             <span className="person-main"><strong>{person.name}</strong><small>{person.staffNumber}</small></span>
                             <span className="person-meta"><span className="qualification-badges">{person.isGeneralEmployee ? <Badge appearance="tint">一般員工</Badge> : qualifications.map((item) => <Badge key={item} appearance="tint" color={item === 'AP' ? 'success' : item === 'CP(T)' ? 'informative' : 'warning'}>{item}</Badge>)}{hasExpired && <Badge appearance="tint" color="danger">資格過期</Badge>}</span><span className={`availability ${statusClass(roster?.status)}`}>{availability}{assignmentLabel ? ` · ${assignmentLabel}` : ''}</span></span>
                           </button>
+                          <Button appearance="subtle" size="small" onClick={() => setReservedStaff((current) => { const next = new Set(current); if (next.has(person.staffNumber)) next.delete(person.staffNumber); else next.add(person.staffNumber); return next; })}>{reservedStaff.has(person.staffNumber) ? '取消保留' : '保留'}</Button>
+                          </div>
                         );
                       })}
                     </section>
@@ -648,11 +694,40 @@ function App() {
                 })}
               </div>
             </aside>
-          </div>}
+          </div> : <ModulePage module={activeModule} date={selectedDate} planningData={planningData} plan={currentPlan} reservedStaff={reservedStaff} />}
         </section>
       </div>
       <footer className="status-footer"><span><span className="status-dot green" />Local data only</span><span>Roster: {selectedDate}</span><span>Formation {planningData.staff.length} · Qualification {planningData.qualifications?.length ?? 0}</span></footer>
     </div>
+  );
+}
+
+interface ModulePageProps {
+  module: string;
+  date: ISODate;
+  planningData: PlanningData;
+  plan: NightPlan;
+  reservedStaff: Set<string>;
+}
+
+function ModulePage({ module, date, planningData, plan, reservedStaff }: ModulePageProps) {
+  const activeWorks = plan.works.filter((work) => work.active);
+  const assigned = new Set(plan.assignments.map((assignment) => assignment.staffNumber));
+  const roster = planningData.roster ?? [];
+  const qualificationRows = planningData.qualifications ?? planningData.staff.flatMap((staff) => (staff.qualifications ?? []).map((qualification) => ({ ...qualification, staffNumber: staff.staffNumber })));
+  const title = module === 'Projects' ? 'Projects' : module === '人員與資格' ? '人員與資格' : module === 'Roster' ? 'Roster' : module === 'Booking Rules' ? 'Booking Rules' : module === '報告與備份' ? '報告與備份' : module;
+  return (
+    <section className="module-page" aria-label={title}>
+      <div className="module-heading"><div><span className="section-kicker">WORKSPACE / {module.toUpperCase()}</span><h2>{title}</h2><p>{date} 的本機 projection 與可追溯資料。</p></div><Badge appearance="tint">Local snapshot</Badge></div>
+      {module === 'Projects' && <>
+        <div className="module-summary"><strong>{activeWorks.length}</strong><span>當晚已啟用 Work</span><strong>{activeWorks.reduce((total, work) => total + work.locations.length, 0)}</strong><span>Locations</span></div>
+        <div className="module-table"><div className="module-row module-row-head"><span>Work</span><span>Project Code</span><span>Type</span><span>Job Description</span><span>Remarks</span></div>{activeWorks.map((work) => <div className="module-row" key={work.id}><strong>Work {work.slot}</strong><span>{work.projectCode || '未輸入'}</span><span>{work.type}</span><span>{work.jobDescription || '未輸入'}</span><span>{work.remarks || '未輸入'}</span></div>)}</div>
+      </>}
+      {module === '人員與資格' && <div className="module-table"><div className="module-row module-row-head"><span>Staff No.</span><span>姓名</span><span>Team</span><span>資格</span><span>Expiry</span></div>{planningData.staff.map((staff) => <div className="module-row" key={staff.staffNumber}><strong>{staff.staffNumber}</strong><span>{staff.name}</span><span>{staff.team}</span><span>{(staff.qualifications ?? []).map((item) => item.type).join(', ') || (staff.isGeneralEmployee ? '一般員工' : '未匯入')}</span><span>{(staff.qualifications ?? []).map((item) => item.expiryDate).join(', ') || '-'}</span></div>)}</div>}
+      {module === 'Roster' && <div className="module-table"><div className="module-row module-row-head"><span>Staff No.</span><span>日期</span><span>狀態</span><span>原因 / raw value</span><span>供應</span></div>{planningData.staff.map((staff) => { const entry = roster.find((item) => item.staffNumber === staff.staffNumber && item.date === date); const available = entry?.status === 'available' || entry?.status === 'night-duty'; return <div className="module-row" key={staff.staffNumber}><strong>{staff.staffNumber}</strong><span>{date}</span><span>{availabilityLabel(entry?.status)}</span><span>{entry?.reason || '未提供 override'}</span><span className={available ? 'ok-text' : 'missing-label'}>{available ? '可供排工' : entry?.status === undefined ? 'unknown' : '不可用'}</span></div>; })}</div>}
+      {module === 'Booking Rules' && <div className="rule-list"><div className="rule-item"><strong>Isolation / Earthing</strong><span>AP required；CP(P) 或 CP(T) 均可</span><Badge appearance="tint">policy v1</Badge></div><div className="rule-item"><strong>Possession</strong><span>CP(P) required</span><Badge appearance="tint">active</Badge></div><div className="rule-item"><strong>PA Work</strong><span>CP(P) 或 CP(T)</span><Badge appearance="tint">active</Badge></div><div className="rule-item"><strong>NP</strong><span>預設 optional，只有模板或 Planner 啟用後 required</span><Badge appearance="tint">configurable</Badge></div><div className="rule-item"><strong>SPC</strong><span>無資格 predicate；當晚可用、同 Job 最多 overlay 一個，並支援另一 AP</span><Badge appearance="tint">active</Badge></div></div>}
+      {module === '報告與備份' && <><div className="module-summary"><strong>{planningData.staff.filter((staff) => roster.some((entry) => entry.staffNumber === staff.staffNumber && (entry.status === 'available' || entry.status === 'night-duty'))).length}</strong><span>可用</span><strong>{qualificationRows.length}</strong><span>資格 rows</span><strong>{assigned.size}</strong><span>已派</span><strong>{reservedStaff.size}</strong><span>保留</span></div><div className="empty-module"><strong>備份與匯出</strong><p>事件資料由 Electron main process 管理。尚未建立可下載的報告檔時，這裡會清楚顯示空狀態，不會產生假檔案。</p></div></>}
+    </section>
   );
 }
 

@@ -8,13 +8,17 @@ import type {
   InMemoryImportState,
   QualificationCommitPort,
   QualificationStagedRow,
+  RosterCommitPort,
+  RosterStagedRow,
+  JobRoleRecordCommitPort,
+  JobRoleRecordStagedRow,
 } from "./types";
 
 function acceptedRows<T>(rows: readonly T[]): readonly T[] {
   return rows;
 }
 
-function receipt<T extends FormationStagedRow | QualificationStagedRow>(
+function receipt<T extends FormationStagedRow | QualificationStagedRow | RosterStagedRow | JobRoleRecordStagedRow>(
   preview: ImportPreview<T>,
   context: ImportCommitContext,
   acceptedRowCount: number,
@@ -32,8 +36,8 @@ function receipt<T extends FormationStagedRow | QualificationStagedRow>(
 }
 
 /** A deterministic repository seam for import tests and early vertical slices. */
-export class InMemoryImportCommitPort implements FormationCommitPort, QualificationCommitPort {
-  private state: InMemoryImportState = { formation: [], qualification: [], batches: [] };
+export class InMemoryImportCommitPort implements FormationCommitPort, QualificationCommitPort, RosterCommitPort, JobRoleRecordCommitPort {
+  private state: InMemoryImportState = { formation: [], qualification: [], roster: [], jobRoleRecords: [], batches: [] };
 
   getState(): InMemoryImportState {
     return {
@@ -42,6 +46,8 @@ export class InMemoryImportCommitPort implements FormationCommitPort, Qualificat
         ...row,
         observations: row.observations.map((observation) => ({ ...observation })),
       })),
+      roster: this.state.roster?.map((row) => ({ ...row })),
+      jobRoleRecords: this.state.jobRoleRecords?.map((row) => ({ ...row })),
       batches: this.state.batches.map((batch) => ({ ...batch })),
     };
   }
@@ -80,6 +86,23 @@ export class InMemoryImportCommitPort implements FormationCommitPort, Qualificat
     };
     const batch = receipt(preview, context, accepted.length);
     this.state.batches = [...this.state.batches, batch];
+    return batch;
+  }
+
+  commitRoster(rows: readonly RosterStagedRow[], preview: ImportPreview<RosterStagedRow>, context: ImportCommitContext): ImportBatchReceipt {
+    const existing = this.state.batches.find((batch) => batch.kind === preview.kind && batch.fingerprint === preview.fingerprint && batch.sourceHash === preview.source.sourceHash);
+    if (existing) return { ...existing };
+    const batch = receipt(preview, context, rows.length);
+    this.state.roster = rows.map((row) => ({ ...row }));
+    this.state.batches = [...this.state.batches, batch];
+    return batch;
+  }
+
+  commitJobRoleRecords(rows: readonly JobRoleRecordStagedRow[], preview: ImportPreview<JobRoleRecordStagedRow>, context: ImportCommitContext): ImportBatchReceipt {
+    const existing = this.state.batches.find((batch) => batch.kind === preview.kind && batch.fingerprint === preview.fingerprint && batch.sourceHash === preview.source.sourceHash);
+    if (existing) return { ...existing };
+    const batch = receipt(preview, context, rows.length);
+    this.state = { ...this.state, jobRoleRecords: rows.map((row) => ({ ...row })), batches: [...this.state.batches, batch] };
     return batch;
   }
 }

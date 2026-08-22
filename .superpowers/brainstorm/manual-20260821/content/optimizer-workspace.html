@@ -1,0 +1,52 @@
+<h2>Planner 最佳化工作台</h2>
+<p class="subtitle">比較候選方案、看見角色短缺原因，再由 Planner 採納或手動修訂。</p>
+
+<div class="mockup">
+  <div class="mockup-header">2026-08-21 · Night plan · Snapshot 18:42</div>
+  <div class="mockup-body" style="font-family:Segoe UI, sans-serif; color:#172033; background:#f7f9fc; padding:16px;">
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
+      <div style="background:#e8f3ff; border:1px solid #a7d4ff; border-radius:8px; padding:10px 14px; min-width:120px;"><small>有效可用</small><br><strong>18 人</strong></div>
+      <div style="background:#eaf8ef; border:1px solid #b5e2c3; border-radius:8px; padding:10px 14px; min-width:120px;"><small>角色需求</small><br><strong>14 / 14</strong></div>
+      <div style="background:#fff5df; border:1px solid #f0d28a; border-radius:8px; padding:10px 14px; min-width:120px;"><small>保留 AP</small><br><strong>2 人</strong></div>
+      <div style="background:#fff0f0; border:1px solid #efb2b2; border-radius:8px; padding:10px 14px; min-width:120px;"><small>未知 roster</small><br><strong>3 人</strong></div>
+    </div>
+    <div style="display:grid; grid-template-columns:1.15fr 1fr; gap:14px;">
+      <div style="background:white; border:1px solid #d9e1ec; border-radius:8px; padding:12px;">
+        <strong>角色容量矩陣</strong>
+        <table style="width:100%; border-collapse:collapse; margin-top:8px; font-size:12px;">
+          <tr style="text-align:left; color:#5b6678;"><th style="padding:5px 3px;">角色</th><th>合資格</th><th>已分配</th><th>保留</th><th>餘額</th></tr>
+          <tr><td style="padding:5px 3px;">AP</td><td>5</td><td>3</td><td>2</td><td style="color:#137333;">0</td></tr>
+          <tr><td style="padding:5px 3px;">CP</td><td>9</td><td>5</td><td>1</td><td style="color:#137333;">3</td></tr>
+          <tr><td style="padding:5px 3px;">NP</td><td>4</td><td>1</td><td>0</td><td style="color:#137333;">3</td></tr>
+          <tr><td style="padding:5px 3px;">HSM</td><td>6</td><td>2</td><td>0</td><td style="color:#137333;">4</td></tr>
+          <tr><td style="padding:5px 3px;">LOM</td><td>5</td><td>1</td><td>0</td><td style="color:#137333;">4</td></tr>
+          <tr><td style="padding:5px 3px;">SPC overlay</td><td>18</td><td>2</td><td>0</td><td style="color:#137333;">16</td></tr>
+        </table>
+      </div>
+      <div style="background:white; border:1px solid #d9e1ec; border-radius:8px; padding:12px;">
+        <strong>方案差異</strong>
+        <div style="margin-top:10px; display:grid; gap:8px; font-size:12px;">
+          <div style="border-left:4px solid #2374e1; padding:7px 9px; background:#f4f8ff;"><b>A · 平衡利用</b><br>保留 2 AP；變更 0 項；所有必填角色完成。</div>
+          <div style="border-left:4px solid #8a5cf6; padding:7px 9px; background:#faf7ff;"><b>B · 最少變更</b><br>沿用昨晚 11 項分配；需要 Planner 接受 1 項 CP 替代。</div>
+          <div style="border-left:4px solid #d9822b; padding:7px 9px; background:#fff9f0;"><b>C · 最大工作量</b><br>可加入 Work 3；會消耗所有可用 AP，無法保留。</div>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:14px; background:#fff8e8; border:1px solid #efd59a; border-radius:8px; padding:10px; font-size:12px;">
+      <b>可解釋性摘要</b>　方案 A 使用資料版本 18:42、規則版本 3.1；SPC-004 支援 AP-17，未跨 Job；未知 roster code 不納入容量。
+    </div>
+  </div>
+</div>
+
+<h3>你希望 Planner 的主要焦點是哪一種？</h3>
+<div class="options">
+  <div class="option" data-choice="capacity" onclick="toggleSelect(this)">
+    <div class="letter">A</div><div class="content"><h3>容量先行</h3><p>先看角色供應、短缺及保留，再看工作細節。</p></div>
+  </div>
+  <div class="option" data-choice="jobs" onclick="toggleSelect(this)">
+    <div class="letter">B</div><div class="content"><h3>工作先行</h3><p>先看每個 Job 的配置，容量以側欄輔助。</p></div>
+  </div>
+  <div class="option" data-choice="compare" onclick="toggleSelect(this)">
+    <div class="letter">C</div><div class="content"><h3>方案比較</h3><p>以候選方案並排比較作為主要工作區。</p></div>
+  </div>
+</div>

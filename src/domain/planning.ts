@@ -57,7 +57,8 @@ export type RosterStatus =
   | "leave"
   | "sickness"
   | "training"
-  | "day-duty";
+  | "day-duty"
+  | "unknown";
 
 export interface RosterEntry {
   date: ISODate;
@@ -129,7 +130,7 @@ export interface Location {
 
 export interface Work {
   id: string;
-  slot: 1 | 2 | 3 | 4;
+  slot: 1 | 2 | 3 | 4 | 5;
   active: boolean;
   projectCode: string;
   type: WorkType;
@@ -152,7 +153,7 @@ export interface Assignment {
 export interface NightPlan {
   id: string;
   date: ISODate;
-  /** A plan always contains Work 1 through Work 4, including inactive slots. */
+  /** A plan always contains Work 1 through Work 5, with the first two active by default. */
   works: readonly Work[];
   assignments: readonly Assignment[];
 }
@@ -388,10 +389,10 @@ function makeAssignmentId(request: AssignmentRequest): string {
 
 /** Construct a four-Work plan with no Locations or assignments. */
 export function createEmptyNightPlan(date: ISODate, id = `night:${date}`): NightPlan {
-  const works: Work[] = ([1, 2, 3, 4] as const).map((slot) => ({
+  const works: Work[] = ([1, 2, 3, 4, 5] as const).map((slot) => ({
     id: `${id}:work-${slot}`,
     slot,
-    active: false,
+    active: slot <= 2,
     projectCode: "",
     type: "Possession",
     jobDescription: "",
@@ -494,9 +495,10 @@ export class PlanningService implements PlanningServiceApi {
 
   isRosterAvailable(date: ISODate, staffNumber: string): boolean {
     const entry = this.getRosterEntry(date, staffNumber);
-    if (!entry) return true;
+    // Missing roster data is unknown, never an implicit supply source.
+    if (!entry) return false;
     if (entry.available === false) return false;
-    return entry.status === undefined || entry.status === "available" || entry.status === "night-duty";
+    return entry.status === "available" || entry.status === "night-duty";
   }
 
   getRosterEntry(date: ISODate, staffNumber: string): RosterEntry | undefined {

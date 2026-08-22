@@ -56,7 +56,7 @@ export type ScenarioRefDto =
   | { kind: "main" }
   | { kind: "scenario"; scenarioId: string };
 
-export type ImportKind = "formation" | "qualification" | "roster";
+export type ImportKind = "formation" | "qualification" | "roster" | "job-role-record";
 export type ImportPreviewStatus = "valid" | "has-warnings" | "has-errors";
 export type ImportBatchStatus = "staged" | "committed" | "rejected";
 
@@ -93,7 +93,7 @@ export interface PersonnelAvailabilityDto {
   rosterStatus?: RosterEntryDto["status"];
   rosterReason?: string;
   currentWorkId?: string;
-  currentWorkSlot?: 1 | 2 | 3 | 4;
+  currentWorkSlot?: 1 | 2 | 3 | 4 | 5;
 }
 
 export interface WorkbenchSnapshotDto {
@@ -114,6 +114,9 @@ export interface MutationEnvelopeDto {
   date: ISODate;
   scenario: ScenarioRefDto;
   expectedRevision: number;
+  /** Reconstruction event-store fields. Legacy revision remains during migration. */
+  expectedSequence?: number;
+  idempotencyKey?: string;
   /** Explicit Planner choice for optional S1 support on this mutation. */
   allowS1Support?: boolean;
 }
@@ -477,6 +480,7 @@ export type OhlrApi = IpcInvoker & {
     preview: IpcMethod<"import:preview">;
     selectFile: IpcMethod<"import:select-file">;
     commit: IpcMethod<"import:commit">;
+    getPathForFile: (file: File) => string;
   };
 };
 

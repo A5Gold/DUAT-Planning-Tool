@@ -28,6 +28,8 @@ import {
   type ImportPreview,
   type FormationStagedRow,
   type QualificationStagedRow,
+  type RosterStagedRow,
+  type JobRoleRecordStagedRow,
 } from "../src/application/import";
 import { ExcelJsWorkbookReader } from "../src/adapters/excel";
 import type { ExcelImportKind } from "../src/application/import";
@@ -37,7 +39,7 @@ export interface MainIpcRuntime {
   readonly application: PlanningApplication;
   readonly repository: PlanningAggregateStore;
   readonly importService: ExcelImportStagingService;
-  readonly previews: Map<string, ImportPreview<FormationStagedRow | QualificationStagedRow>>;
+  readonly previews: Map<string, ImportPreview<FormationStagedRow | QualificationStagedRow | RosterStagedRow | JobRoleRecordStagedRow>>;
 }
 
 function errorResult(error: IpcError): { ok: false; error: IpcError } {
@@ -51,7 +53,7 @@ function invalidRequest(error: unknown): IpcError {
   return { kind: "invalid-request", code: "INVALID_REQUEST", message: "IPC request validation failed.", fields };
 }
 
-function mapImportPreview(preview: ImportPreview<FormationStagedRow | QualificationStagedRow>): ImportPreviewDto {
+function mapImportPreview(preview: ImportPreview<FormationStagedRow | QualificationStagedRow | RosterStagedRow | JobRoleRecordStagedRow>): ImportPreviewDto {
   return {
     importId: preview.importId,
     kind: preview.kind,
@@ -66,15 +68,30 @@ function mapImportPreview(preview: ImportPreview<FormationStagedRow | Qualificat
       const normalized = row.normalized;
       const values: Record<string, string | number | boolean | null> = {
         staffNumber: normalized?.staffNumber ?? null,
-        displayName: normalized?.displayName ?? null,
+        displayName: normalized && "displayName" in normalized ? normalized.displayName ?? null : null,
         status: row.status,
       };
-      if (normalized && "team" in normalized) values.team = normalized.team;
-      if (normalized && "sourceTeam" in normalized) values.team = normalized.sourceTeam;
-      return {
+      // The IPC contract is a strict JSON-like DTO: optional source cells must
+      // be omitted or represented as null, never left as undefined.
+      if (normalized && "team" in normalized && normalized.team !== undefined) values.team = normalized.team;
+      if (normalized && "sourceTeam" in normalized) values.team = normalized.sourceTeam ?? null;
+      if (normalized && "date" in normalized) {
+        values.date = normalized.date ?? null;
+        values.rawCode = normalized.rawCode ?? null;
+        values.status = normalized.status;
+        values.available = normalized.available;
+      }
+      if (normalized && "workDate" in normalized) {
+        values.date = normalized.workDate ?? null;
+        values.rawStaffName = normalized.rawStaffName ?? null;
+        values.role = normalized.role ?? null;
+        values.matchStatus = normalized.matchStatus ?? null;
+        values.tn = normalized.tn ?? null;
+        values.line = normalized.line ?? null;
+      }
+      const dto: ImportPreviewDto["rows"][number] = {
         rowNumber: row.rowNumber,
         status: row.status,
-        staffNumber: normalized?.staffNumber,
         values,
         issues: row.issues.map((item) => ({
           rowNumber: row.rowNumber,
@@ -84,6 +101,11 @@ function mapImportPreview(preview: ImportPreview<FormationStagedRow | Qualificat
           column: item.field,
         })),
       };
+      // Optional DTO fields must be omitted when no identity was resolved.
+      // Sending `staffNumber: undefined` crosses the IPC boundary as an
+      // own-property and is rejected by the strict response validator.
+      if (normalized?.staffNumber !== undefined) dto.staffNumber = normalized.staffNumber;
+      return dto;
     }),
     issues: preview.issues.map((item) => ({
       rowNumber: item.source?.row ?? 1,
@@ -140,8 +162,8 @@ function mapError(error: unknown): IpcError {
 }
 
 function importKind(kind: ImportPreviewRequest["kind"]): ExcelImportKind {
-  if (kind === "formation" || kind === "qualification") return kind;
-  throw new ImportPipelineError("NO_SUPPORTED_WORKSHEET", "Roster import staging will be enabled in a later phase.");
+  if (kind === "formation" || kind === "qualification" || kind === "roster" || kind === "job-role-record") return kind;
+  throw new ImportPipelineError("NO_SUPPORTED_WORKSHEET", "不支援的 import kind。");
 }
 
 function register<C extends IpcChannel>(
@@ -210,10 +232,16 @@ export function registerIpcHandlers(runtime: MainIpcRuntime): void {
     }
     const preview = runtime.previews.get(request.importId);
     if (!preview) throw new ImportPipelineError("SOURCE_READ_FAILED", "找不到 import preview，請重新預覽。");
+    const acceptedRowIds = request.acceptedRowNumbers
+      ? preview.rows
+        .filter((row) => request.acceptedRowNumbers?.includes(row.rowNumber)
+          && row.issues.every((item) => item.severity !== "error"))
+        .map((row) => row.id)
+      : undefined;
     const batch = await runtime.importService.commit(preview, {
       expectedSourceHash: preview.source.sourceHash,
       expectedFingerprint: preview.fingerprint,
-      acceptedRowIds: request.acceptedRowNumbers?.map((row) => `${preview.kind}:${preview.selectedWorksheet.index}:${row}`),
+      acceptedRowIds,
     });
     runtime.previews.delete(request.importId);
     const snapshot = runtime.application.getWorkbench(request.date, request.scenario);
@@ -240,6 +268,8 @@ export function createMainIpcRuntime(database: Database.Database): MainIpcRuntim
     importService: new ExcelImportStagingService(new ExcelJsWorkbookReader(), {
       formation: importPort,
       qualification: importPort,
+      roster: importPort,
+      jobRoleRecord: importPort,
     }),
     previews: new Map(),
   };

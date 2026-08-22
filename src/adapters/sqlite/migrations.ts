@@ -34,7 +34,7 @@ export const SQLITE_MIGRATIONS: readonly SqliteMigration[] = [
         staff_number TEXT NOT NULL REFERENCES staff(staff_number) ON DELETE CASCADE,
         status TEXT CHECK (
           status IS NULL OR status IN (
-            'available', 'night-duty', 'unavailable', 'leave', 'sickness', 'training', 'day-duty'
+            'available', 'night-duty', 'unavailable', 'leave', 'sickness', 'training', 'day-duty', 'unknown'
           )
         ),
         available INTEGER CHECK (available IS NULL OR available IN (0, 1)),
@@ -78,7 +78,7 @@ export const SQLITE_MIGRATIONS: readonly SqliteMigration[] = [
       CREATE TABLE works (
         plan_storage_id TEXT NOT NULL REFERENCES night_plans(storage_id) ON DELETE CASCADE,
         domain_id TEXT NOT NULL,
-        slot INTEGER NOT NULL CHECK (slot BETWEEN 1 AND 4),
+        slot INTEGER NOT NULL CHECK (slot BETWEEN 1 AND 5),
         active INTEGER NOT NULL CHECK (active IN (0, 1)),
         project_code TEXT NOT NULL,
         work_type TEXT NOT NULL CHECK (work_type IN ('Possession', 'PA Work')),
@@ -150,7 +150,7 @@ export const SQLITE_MIGRATIONS: readonly SqliteMigration[] = [
     up: `
       CREATE TABLE import_batches (
         id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL CHECK (kind IN ('formation', 'qualification')),
+        kind TEXT NOT NULL CHECK (kind IN ('formation', 'qualification', 'roster', 'job-role-record')),
         source_hash TEXT NOT NULL,
         fingerprint TEXT NOT NULL,
         worksheet_name TEXT NOT NULL,
@@ -169,6 +169,114 @@ export const SQLITE_MIGRATIONS: readonly SqliteMigration[] = [
         payload_json TEXT NOT NULL,
         PRIMARY KEY (batch_id, row_id)
       ) STRICT;
+    `,
+  },
+  {
+    version: 3,
+    name: "fifth_work_slot_and_roster_import",
+    // The v1/v2 migration text is generated from the current schema source.
+    // Keep this version as a marker for clean installs; no destructive table
+    // replacement is needed because the initial schema already accepts slot 5.
+      up: `SELECT 1;`,
+  },
+  {
+    version: 4,
+    name: "reference_workforce_and_job_role_records",
+    up: `
+      CREATE TABLE staff_source_metadata (
+        staff_number TEXT PRIMARY KEY REFERENCES staff(staff_number) ON DELETE CASCADE,
+        raw_team TEXT NOT NULL,
+        grade TEXT,
+        title TEXT,
+        source_hash TEXT NOT NULL,
+        source_worksheet TEXT NOT NULL,
+        source_row INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE TABLE job_role_records (
+        id TEXT PRIMARY KEY,
+        work_date TEXT NOT NULL,
+        tn TEXT NOT NULL,
+        line TEXT NOT NULL,
+        work_nature TEXT NOT NULL,
+        time_indicator TEXT NOT NULL,
+        role TEXT NOT NULL,
+        raw_staff_name TEXT NOT NULL,
+        staff_number TEXT REFERENCES staff(staff_number),
+        match_status TEXT NOT NULL CHECK (match_status IN ('matched', 'unresolved', 'non-person')),
+        layer TEXT NOT NULL CHECK (layer = 'legacy_planned_candidate'),
+        remark TEXT,
+        source_hash TEXT NOT NULL,
+        source_worksheet TEXT NOT NULL,
+        source_row INTEGER NOT NULL,
+        source_column INTEGER NOT NULL,
+        raw_payload_json TEXT NOT NULL
+      ) STRICT;
+      CREATE INDEX job_role_records_by_date ON job_role_records(work_date, staff_number);
+
+      CREATE TABLE import_exceptions (
+        id TEXT PRIMARY KEY,
+        import_batch_id TEXT REFERENCES import_batches(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        source_hash TEXT NOT NULL,
+        source_worksheet TEXT NOT NULL,
+        source_row INTEGER NOT NULL,
+        source_column INTEGER,
+        code TEXT NOT NULL,
+        severity TEXT NOT NULL CHECK (severity IN ('error', 'warning')),
+        message TEXT NOT NULL,
+        payload_json TEXT
+      ) STRICT;
+
+      CREATE TABLE import_batches_v4 (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('formation', 'qualification', 'roster', 'job-role-record')),
+        source_hash TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        worksheet_name TEXT NOT NULL,
+        committed_at TEXT NOT NULL,
+        row_count INTEGER NOT NULL CHECK (row_count >= 0),
+        accepted_row_count INTEGER NOT NULL CHECK (accepted_row_count >= 0)
+      ) STRICT;
+      INSERT INTO import_batches_v4 SELECT id, kind, source_hash, fingerprint, worksheet_name, committed_at, row_count, accepted_row_count FROM import_batches;
+      CREATE UNIQUE INDEX import_batches_fingerprint_v4 ON import_batches_v4(fingerprint);
+      CREATE TABLE import_batch_rows_v4 (
+        batch_id TEXT NOT NULL REFERENCES import_batches_v4(id) ON DELETE CASCADE,
+        row_id TEXT NOT NULL,
+        row_number INTEGER NOT NULL CHECK (row_number >= 1),
+        disposition TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        PRIMARY KEY (batch_id, row_id)
+      ) STRICT;
+      INSERT INTO import_batch_rows_v4 SELECT batch_id, row_id, row_number, disposition, payload_json FROM import_batch_rows;
+      DROP TABLE import_batch_rows;
+      DROP TABLE import_batches;
+      ALTER TABLE import_batches_v4 RENAME TO import_batches;
+      ALTER TABLE import_batch_rows_v4 RENAME TO import_batch_rows;
+      CREATE UNIQUE INDEX import_batches_fingerprint ON import_batches(fingerprint);
+    `,
+  },
+  {
+    version: 5,
+    name: "allow_unknown_roster_status",
+    up: `
+      CREATE TABLE roster_entries_v5 (
+        planning_date TEXT NOT NULL,
+        staff_number TEXT NOT NULL REFERENCES staff(staff_number) ON DELETE CASCADE,
+        status TEXT CHECK (
+          status IS NULL OR status IN (
+            'available', 'night-duty', 'unavailable', 'leave', 'sickness', 'training', 'day-duty', 'unknown'
+          )
+        ),
+        available INTEGER CHECK (available IS NULL OR available IN (0, 1)),
+        reason TEXT,
+        PRIMARY KEY (planning_date, staff_number)
+      ) STRICT;
+      INSERT INTO roster_entries_v5 (planning_date, staff_number, status, available, reason)
+        SELECT planning_date, staff_number, status, available, reason FROM roster_entries;
+      DROP TABLE roster_entries;
+      ALTER TABLE roster_entries_v5 RENAME TO roster_entries;
+      CREATE INDEX roster_by_date ON roster_entries(planning_date, staff_number);
     `,
   },
 ];

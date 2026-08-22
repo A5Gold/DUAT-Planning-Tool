@@ -26,6 +26,7 @@ const data: PlanningData = {
       qualifications: [{ type: "AP", expiryDate: "2026-12-31" }],
     },
   ],
+  roster: [{ date, staffNumber: "S1-AP", status: "night-duty" }],
 };
 
 class MemoryAggregateStore implements PlanningAggregateStore {

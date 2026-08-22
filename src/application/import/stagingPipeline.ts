@@ -26,6 +26,11 @@ import type {
   QualificationKind,
   QualificationObservation,
   QualificationStagedRow,
+  RosterCommitPort,
+  RosterStagedRow,
+  JobRoleRecordCommitPort,
+  JobRoleRecordRole,
+  JobRoleRecordStagedRow,
   WorksheetDescriptor,
 } from "./types";
 
@@ -51,6 +56,13 @@ interface WorksheetAnalysis {
   formationHeaderRow?: number;
   qualificationHeader?: QualificationHeader;
   updateOn?: string;
+  rosterDateRow?: number;
+  rosterStaffColumn?: number;
+  rosterStaffHeaderRow?: number;
+  rosterYear?: number;
+  rosterMonth?: number;
+  jobRoleHeaderRow?: number;
+  jobRoleColumns?: readonly { column: number; role?: JobRoleRecordRole; label: string }[];
 }
 
 const QUALIFICATION_CATALOG: Readonly<Record<string, { kind: QualificationKind; domain: QualificationDomain }>> = {
@@ -198,8 +210,64 @@ function findQualificationHeader(sheet: ExcelWorksheetSnapshot): QualificationHe
 
 function analyzeWorksheet(sheet: ExcelWorksheetSnapshot, kind: ExcelImportKind): WorksheetAnalysis {
   if (kind === "formation") return { formationHeaderRow: findFormationHeader(sheet) };
+  if (kind === "roster") return findRosterHeader(sheet);
+  if (kind === "job-role-record") return findJobRoleHeader(sheet);
   const update = findUpdateOn(sheet);
   return { qualificationHeader: findQualificationHeader(sheet), updateOn: update.value };
+}
+
+function findRosterHeader(sheet: ExcelWorksheetSnapshot): WorksheetAnalysis {
+  const monthNames = [
+    "jan", "feb", "mar", "apr", "may", "jun",
+    "jul", "aug", "sep", "oct", "nov", "dec",
+  ];
+  const monthMatch = sheet.name.match(/(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{4})/i);
+  const year = monthMatch ? Number(monthMatch[2]) : undefined;
+  const month = monthMatch ? monthNames.indexOf(monthMatch[1].toLowerCase()) + 1 : undefined;
+  for (let row = 1; row <= Math.min(sheet.rowCount, 20); row += 1) {
+    const values = sheet.rows[row - 1] ?? [];
+    const staffColumn = values.findIndex((cell) => /staff\s*(no\.?|number)/i.test(cellText(cell) ?? ""));
+    if (staffColumn < 0) continue;
+    for (let dateRow = Math.max(1, row - 5); dateRow < row; dateRow += 1) {
+      const dates = sheet.rows[dateRow - 1] ?? [];
+      const dayCells = dates.filter((cell) => cell.kind === "number" && Number.isInteger(cell.value) && cell.value >= 1 && cell.value <= 31).length;
+      if (dates.some((cell) => cell.kind === "date") || dayCells >= 2) {
+        return {
+          rosterDateRow: dateRow,
+          rosterStaffColumn: staffColumn + 1,
+          rosterStaffHeaderRow: row,
+          rosterYear: year,
+          rosterMonth: month,
+        };
+      }
+    }
+  }
+  return {};
+}
+
+function roleFromHeader(value: string): JobRoleRecordRole | undefined {
+  const normalized = value.toUpperCase().replace(/\s+/g, " ").trim();
+  if (normalized.startsWith("CP(P)")) return "CP(P)";
+  if (normalized.startsWith("CP(T)")) return "CP(T)";
+  if (normalized.startsWith("AP(")) return "AP";
+  if (normalized.startsWith("SPC(")) return "SPC";
+  if (normalized.startsWith("HSM")) return "HSM";
+  if (normalized.startsWith("LOM")) return "LOM";
+  return undefined;
+}
+
+function findJobRoleHeader(sheet: ExcelWorksheetSnapshot): WorksheetAnalysis {
+  for (let row = 1; row <= Math.min(sheet.rowCount, 12); row += 1) {
+    const values = sheet.rows[row - 1] ?? [];
+    const labels = values.map((cell) => normalizeHeader(cellText(cell)));
+    if (labels[0] !== "date" || labels[1] !== "tn" || labels[2] !== "line" || labels[3] !== "work nature" || labels[4] !== "time indicator") continue;
+    const columns = values.slice(5).map((cell, index) => {
+      const label = cellText(cell) ?? "";
+      return { column: index + 6, role: roleFromHeader(label), label };
+    }).filter((item) => item.label);
+    return { jobRoleHeaderRow: row, jobRoleColumns: columns };
+  }
+  return {};
 }
 
 function descriptor(sheet: ExcelWorksheetSnapshot, analysis: WorksheetAnalysis): WorksheetDescriptor {
@@ -211,6 +279,7 @@ function descriptor(sheet: ExcelWorksheetSnapshot, analysis: WorksheetAnalysis):
     updateOn: analysis.updateOn,
     hasFormationHeader: Boolean(analysis.formationHeaderRow),
     hasQualificationHeader: Boolean(analysis.qualificationHeader),
+    hasJobRoleHeader: Boolean(analysis.jobRoleHeaderRow),
   };
 }
 
@@ -236,10 +305,19 @@ function selectWorksheet(
     if (kind === "qualification" && !selected.analysis.qualificationHeader) {
       issues.push(issue("HEADER_MISSING", "指定 worksheet 缺少 Qualification header。", selected.sheet, 1, 1));
     }
+    if (kind === "job-role-record" && !selected.analysis.jobRoleHeaderRow) {
+      issues.push(issue("JOB_ROLE_HEADER_MISSING", "指定 worksheet 缺少 Job Role Record Data Input header。", selected.sheet, 1, 1));
+    }
     return { selected: selected.sheet, selectedAnalysis: selected.analysis, descriptors, issues };
   }
 
-  const candidates = analyzed.filter(({ analysis }) => kind === "formation" ? Boolean(analysis.formationHeaderRow) : Boolean(analysis.qualificationHeader));
+  const candidates = analyzed.filter(({ analysis }) => kind === "formation"
+    ? Boolean(analysis.formationHeaderRow)
+    : kind === "roster"
+      ? Boolean(analysis.rosterDateRow && analysis.rosterStaffColumn)
+      : kind === "job-role-record"
+        ? Boolean(analysis.jobRoleHeaderRow)
+        : Boolean(analysis.qualificationHeader));
   if (candidates.length === 0) {
     const fallback = snapshot.worksheets[0];
     issues.push(issue("NO_SUPPORTED_WORKSHEET", `找不到支援的 ${kind} worksheet。`, fallback, 1, 1));
@@ -251,6 +329,16 @@ function selectWorksheet(
       return { descriptors, issues };
     }
     return { selected: candidates[0].sheet, selectedAnalysis: candidates[0].analysis, descriptors, issues };
+  }
+  if (kind === "roster") {
+    // Roster workbooks commonly contain one worksheet per month.  The caller
+    // may provide worksheetName for a specific month; otherwise use the first
+    // dated sheet as a deterministic preview target.
+    return { selected: candidates[0].sheet, selectedAnalysis: candidates[0].analysis, descriptors, issues };
+  }
+  if (kind === "job-role-record") {
+    const dataInput = candidates.find(({ sheet }) => sheet.name.toLowerCase() === "data input") ?? candidates[0];
+    return { selected: dataInput.sheet, selectedAnalysis: dataInput.analysis, descriptors, issues };
   }
   const withDates = candidates.filter(({ analysis }) => analysis.updateOn);
   if (withDates.length === 0) {
@@ -450,7 +538,155 @@ function makeSource(snapshot: ExcelWorkbookSnapshot): ImportSource {
   return { ...snapshot.source };
 }
 
-function previewStatus<T extends FormationStagedRow | QualificationStagedRow>(rows: readonly ImportStagingRow<T>[], globalIssues: readonly ImportIssue[]): ImportPreview<T>["status"] {
+function rosterStatus(rawCode: string): RosterStagedRow["status"] {
+  const code = rawCode.trim().toUpperCase().replace(/\s+/g, "");
+  if (code === "N" || code === "N0" || code === "D+N") return "night-duty";
+  if (["D", "HR", "S7"].includes(code)) return "available";
+  if (code === "AL" || code.startsWith("AL(") || code === "ALAM" || code === "ALPM") return "leave";
+  if (["SL", "SICK"].includes(code)) return "sickness";
+  if (code === "TR" || code === "TRAINING" || /^T\d+(\/T\d+)?(?:\([^)]*\))?$/.test(code) || code.startsWith("T(")) return "training";
+  if (["SH", "CL", "RD", "REST", "HOLIDAY"].includes(code)) return "unavailable";
+  if (["DAY", "DAY-DUTY"].includes(code)) return "day-duty";
+  return "unknown";
+}
+
+function isKnownRosterCode(rawCode: string): boolean {
+  const code = rawCode.trim().toUpperCase().replace(/\s+/g, "");
+  return code === "D" || code === "N" || code === "N0" || code === "D+N" || code === "SL" || code === "SH"
+    || code === "SICK" || code === "TR" || code === "TRAINING" || code.startsWith("T(")
+    || /^T\d+(\/T\d+)?(?:\([^)]*\))?$/.test(code) || code === "RD" || code === "REST" || code === "HR"
+    || code === "S7" || code === "HOLIDAY" || code === "DAY" || code === "DAY-DUTY" || code === "CL"
+    || code === "OT" || code === "TY" || code === "AL" || code === "ALAM" || code === "ALPM" || code.startsWith("AL(");
+}
+
+function rosterDateValue(
+  cell: ExcelCell | undefined,
+  year: number | undefined,
+  month: number | undefined,
+): string | undefined {
+  if (!cell || cell.kind === "blank") return undefined;
+  if (cell.kind === "date") return formatDate(cell.value);
+  const text = cellText(cell);
+  if (text && /^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  if (!year || !month) return undefined;
+  const day = cell.kind === "number" ? cell.value : Number(text);
+  if (!Number.isInteger(day) || day < 1 || day > 31) return undefined;
+  const candidate = new Date(Date.UTC(year, month - 1, day));
+  return candidate.getUTCFullYear() === year && candidate.getUTCMonth() === month - 1 && candidate.getUTCDate() === day
+    ? formatDate(candidate)
+    : undefined;
+}
+
+function parseRosterRows(sheet: ExcelWorksheetSnapshot, analysis: WorksheetAnalysis, options: ImportPreviewOptions): readonly ImportStagingRow<RosterStagedRow>[] {
+  const dateRow = analysis.rosterDateRow;
+  const staffColumn = analysis.rosterStaffColumn;
+  if (!dateRow || !staffColumn) return [];
+  const dates = (sheet.rows[dateRow - 1] ?? []).map((cell) => rosterDateValue(cell, analysis.rosterYear, analysis.rosterMonth));
+  const result: ImportStagingRow<RosterStagedRow>[] = [];
+  const firstDataRow = (analysis.rosterStaffHeaderRow ?? dateRow + 1) + 1;
+  for (let rowNumber = firstDataRow; rowNumber <= sheet.rowCount; rowNumber += 1) {
+    const values = sheet.rows[rowNumber - 1] ?? [];
+    const staff = cellText(values[staffColumn - 1])?.replace(/\s+/g, "");
+    if (!staff || !/^\d+$/.test(staff)) continue;
+    for (let column = staffColumn + 1; column <= values.length; column += 1) {
+      const date = dates[column - 1];
+      const rawCode = cellText(values[column - 1]);
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !rawCode) continue;
+      const known = isKnownRosterCode(rawCode);
+      const issues: ImportIssue[] = known ? [] : [issue("UNKNOWN_ROSTER_CODE", `未知 Roster code「${rawCode}」，將保持不可用。`, sheet, rowNumber, column, "warning", "rawCode")];
+      if (options.knownStaffNumbers && !options.knownStaffNumbers.has(staff)) {
+        issues.push(issue("UNKNOWN_STAFF_NUMBER", `Staff number ${staff} 不在既有 Formation。`, sheet, rowNumber, staffColumn, "error", "staffNumber"));
+      }
+      const status = rosterStatus(rawCode);
+      const rawTeam = cellText(values[0]);
+      const displayName = cellText(values[1]);
+      const grade = cellText(values[2]);
+      const normalized: RosterStagedRow = {
+        staffNumber: staff,
+        displayName,
+        sourceTeam: rawTeam,
+        grade,
+        isSupervisor: rawTeam === "Sup." || rawTeam === "Sr. Sup.",
+        date,
+        rawCode,
+        status,
+        available: known && (status === "available" || status === "night-duty"),
+        reason: known ? undefined : `Unknown roster code: ${rawCode}`,
+      };
+      const hasError = issues.some((item) => item.severity === "error");
+      result.push({
+        id: `roster:${sheet.index}:${rowNumber}:${column}`,
+        rowNumber,
+        source: sourceRef(sheet, rowNumber, column),
+        normalized,
+        status: hasError ? "invalid" : issues.length ? "warning" : "valid",
+        disposition: hasError ? "requires_action" : "include",
+        issues,
+      });
+    }
+  }
+  return result;
+}
+
+function normalizeStaffName(value: string): string {
+  return value.toLocaleLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/gi, "");
+}
+
+function parseJobRoleRows(
+  sheet: ExcelWorksheetSnapshot,
+  analysis: WorksheetAnalysis,
+  options: ImportPreviewOptions,
+): readonly ImportStagingRow<JobRoleRecordStagedRow>[] {
+  const headerRow = analysis.jobRoleHeaderRow;
+  const columns = analysis.jobRoleColumns ?? [];
+  if (!headerRow) return [];
+  const identityByName = new Map<string, string>();
+  for (const [staffNumber, person] of options.knownStaff ?? []) {
+    const key = normalizeStaffName(person.displayName);
+    if (key && !identityByName.has(key)) identityByName.set(key, staffNumber);
+  }
+  const result: ImportStagingRow<JobRoleRecordStagedRow>[] = [];
+  for (let rowNumber = headerRow + 1; rowNumber <= sheet.rowCount; rowNumber += 1) {
+    const values = sheet.rows[rowNumber - 1] ?? [];
+    if (rowIsCompletelyBlank(sheet, rowNumber)) continue;
+    const dateCell = values[0];
+    const date = cellText(dateCell);
+    const issues: ImportIssue[] = [];
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      issues.push(issue("INVALID_DATE", "Job Role Record Date 必須是有效日期。", sheet, rowNumber, 1, "error", "workDate"));
+    }
+    const base = {
+      workDate: date ?? "",
+      tn: cellText(values[1]) ?? "",
+      line: cellText(values[2]) ?? "",
+      workNature: cellText(values[3]) ?? "",
+      timeIndicator: cellText(values[4]) ?? "",
+    };
+    const remark = cellText(values[32]);
+    for (const column of columns) {
+      if (!column.role) continue;
+      const rawStaffName = cellText(values[column.column - 1]);
+      if (!rawStaffName) continue;
+      const staffNumber = identityByName.get(normalizeStaffName(rawStaffName));
+      const nonPerson = /^(work with|tov set up|jobs cancelled|undefined$)/i.test(rawStaffName);
+      const matchStatus = nonPerson ? "non-person" : staffNumber ? "matched" : "unresolved";
+      const rowIssues = [...issues];
+      if (matchStatus === "unresolved") rowIssues.push(issue("UNRESOLVED_STAFF_NAME", `找不到 Job Role Record 人員「${rawStaffName}」的明確 Staff No.，先保留為 legacy candidate。`, sheet, rowNumber, column.column, "warning", "rawStaffName"));
+      result.push({
+        id: `job-role-record:${sheet.index}:${rowNumber}:${column.column}`,
+        rowNumber,
+        source: sourceRef(sheet, rowNumber, column.column),
+        normalized: { ...base, role: column.role, rawStaffName, staffNumber, matchStatus, remark },
+        status: rowIssues.some((item) => item.severity === "error") ? "invalid" : rowIssues.length ? "warning" : "valid",
+        disposition: rowIssues.some((item) => item.severity === "error") ? "requires_action" : "include",
+        issues: rowIssues,
+      });
+    }
+  }
+  return result;
+}
+
+function previewStatus<T extends FormationStagedRow | QualificationStagedRow | RosterStagedRow | JobRoleRecordStagedRow>(rows: readonly ImportStagingRow<T>[], globalIssues: readonly ImportIssue[]): ImportPreview<T>["status"] {
   const all = [...globalIssues, ...rows.flatMap((row) => row.issues)];
   if (all.some((item) => item.severity === "error")) return "has-errors";
   if (all.some((item) => item.severity === "warning")) return "has-warnings";
@@ -461,7 +697,7 @@ export function inspectImportWorkbook(snapshot: ExcelWorkbookSnapshot, kind: Exc
   return snapshot.worksheets.map((sheet) => descriptor(sheet, analyzeWorksheet(sheet, kind)));
 }
 
-export function previewImportFromSnapshot<T extends FormationStagedRow | QualificationStagedRow>(
+export function previewImportFromSnapshot<T extends FormationStagedRow | QualificationStagedRow | RosterStagedRow | JobRoleRecordStagedRow>(
   snapshot: ExcelWorkbookSnapshot,
   kind: ExcelImportKind,
   options: ImportPreviewOptions = {},
@@ -480,6 +716,11 @@ export function previewImportFromSnapshot<T extends FormationStagedRow | Qualifi
         globalIssues.push(issue("UNSUPPORTED_QUALIFICATION_COLUMN", `不支援的 qualification code「${unsupported.value}」。`, selected, selectedAnalysis.qualificationHeader.codeRow, unsupported.column, "error", unsupported.value));
       }
       rows = parseQualificationRows(selected, selectedAnalysis.qualificationHeader, options) as readonly ImportStagingRow<T>[];
+    } else if (kind === "roster") {
+      rows = parseRosterRows(selected, selectedAnalysis, options) as readonly ImportStagingRow<T>[];
+    } else if (kind === "job-role-record") {
+      if (!selectedAnalysis.jobRoleHeaderRow) globalIssues.push(issue("JOB_ROLE_HEADER_MISSING", "找不到 Job Role Record 的 Data Input header。", selected, 1, 1));
+      rows = parseJobRoleRows(selected, selectedAnalysis, options) as readonly ImportStagingRow<T>[];
     }
   }
   const selectedDescriptor = descriptor(fallback, selectedAnalysis ?? analyzeWorksheet(fallback, kind));
@@ -520,6 +761,8 @@ export class ImportPipelineError extends Error {
 export interface ImportCommitPorts {
   formation: FormationCommitPort;
   qualification: QualificationCommitPort;
+  roster?: RosterCommitPort;
+  jobRoleRecord?: JobRoleRecordCommitPort;
 }
 
 export class ExcelImportStagingService {
@@ -530,16 +773,26 @@ export class ExcelImportStagingService {
     return { source: snapshot.source, worksheets: inspectImportWorkbook(snapshot, kind) };
   }
 
-  async preview(filePath: string, kind: ExcelImportKind, options: ImportPreviewOptions = {}): Promise<ImportPreview<FormationStagedRow | QualificationStagedRow>> {
+  async preview(filePath: string, kind: ExcelImportKind, options: ImportPreviewOptions = {}): Promise<ImportPreview<FormationStagedRow | QualificationStagedRow | RosterStagedRow | JobRoleRecordStagedRow>> {
     const snapshot = await this.reader.read(filePath);
     return previewImportFromSnapshot(snapshot, kind, options);
   }
 
   async commit(
-    preview: ImportPreview<FormationStagedRow | QualificationStagedRow>,
+    preview: ImportPreview<FormationStagedRow | QualificationStagedRow | RosterStagedRow | JobRoleRecordStagedRow>,
     context: ImportCommitContext = {},
   ): Promise<ImportBatchReceipt> {
-    if (preview.status === "has-errors") throw new ImportPipelineError("PREVIEW_NOT_COMMITTABLE", "Import preview 含有 blocking errors，不能 commit。", preview.issues);
+    if (preview.status === "has-errors") {
+      const acceptedIds = context.acceptedRowIds ? new Set(context.acceptedRowIds) : undefined;
+      const rowIssues = new Set(preview.rows.flatMap((row) => row.issues));
+      const globalBlocking = preview.issues.some((item) => item.severity === "error" && !rowIssues.has(item));
+      const acceptedBlocking = acceptedIds
+        ? preview.rows.some((row) => acceptedIds.has(row.id) && row.issues.some((item) => item.severity === "error"))
+        : true;
+      if (!acceptedIds || acceptedBlocking || globalBlocking) {
+        throw new ImportPipelineError("PREVIEW_NOT_COMMITTABLE", "Import preview 含有 blocking errors，不能 commit。", preview.issues);
+      }
+    }
     if (context.expectedSourceHash && context.expectedSourceHash !== preview.source.sourceHash) throw new ImportPipelineError("SOURCE_READ_FAILED", "Import source hash 與 preview 不一致。", []);
     if (context.expectedFingerprint && context.expectedFingerprint !== preview.fingerprint) throw new ImportPipelineError("SOURCE_READ_FAILED", "Import preview fingerprint 與預期不一致。", []);
     if (preview.source.filePath) {
@@ -554,6 +807,12 @@ export class ExcelImportStagingService {
     const acceptedIds = context.acceptedRowIds ? new Set(context.acceptedRowIds) : undefined;
     const eligible = preview.rows.filter((row) => row.normalized && row.disposition === "include" && (!acceptedIds || acceptedIds.has(row.id))).map((row) => row.normalized!);
     if (preview.kind === "formation") return this.ports.formation.commitFormation(eligible as readonly FormationStagedRow[], preview as ImportPreview<FormationStagedRow>, { ...context, expectedSourceHash: preview.source.sourceHash, expectedFingerprint: preview.fingerprint });
-    return this.ports.qualification.commitQualification(eligible as readonly QualificationStagedRow[], preview as ImportPreview<QualificationStagedRow>, { ...context, expectedSourceHash: preview.source.sourceHash, expectedFingerprint: preview.fingerprint });
+    if (preview.kind === "qualification") return this.ports.qualification.commitQualification(eligible as readonly QualificationStagedRow[], preview as ImportPreview<QualificationStagedRow>, { ...context, expectedSourceHash: preview.source.sourceHash, expectedFingerprint: preview.fingerprint });
+    if (preview.kind === "roster") {
+      if (!this.ports.roster) throw new ImportPipelineError("NO_SUPPORTED_WORKSHEET", "Roster import 尚未設定 commit port。");
+      return this.ports.roster.commitRoster(eligible as readonly RosterStagedRow[], preview as ImportPreview<RosterStagedRow>, { ...context, expectedSourceHash: preview.source.sourceHash, expectedFingerprint: preview.fingerprint });
+    }
+    if (!this.ports.jobRoleRecord) throw new ImportPipelineError("NO_SUPPORTED_WORKSHEET", "Job Role Record import 尚未設定 commit port。");
+    return this.ports.jobRoleRecord.commitJobRoleRecords(eligible as readonly JobRoleRecordStagedRow[], preview as ImportPreview<JobRoleRecordStagedRow>, { ...context, expectedSourceHash: preview.source.sourceHash, expectedFingerprint: preview.fingerprint });
   }
 }

@@ -94,7 +94,7 @@ interface ScenarioRow {
 
 interface WorkRow {
   domain_id: string;
-  slot: 1 | 2 | 3 | 4;
+  slot: 1 | 2 | 3 | 4 | 5;
   active: number;
   project_code: string;
   work_type: Work["type"];
@@ -136,8 +136,8 @@ function validateAggregateShape(state: PlanningState): void {
   if (state.main.date !== state.date) {
     throw new Error(`Main plan date ${state.main.date} does not match aggregate date ${state.date}.`);
   }
-  if (state.main.works.length !== 4 || new Set(state.main.works.map((work) => work.slot)).size !== 4) {
-    throw new Error("A planning aggregate main plan must contain exactly Work slots 1 through 4.");
+  if (state.main.works.length !== 5 || new Set(state.main.works.map((work) => work.slot)).size !== 5) {
+    throw new Error("A planning aggregate main plan must contain exactly Work slots 1 through 5.");
   }
   const scenarioIds = new Set<string>();
   for (const scenario of state.scenarios) {

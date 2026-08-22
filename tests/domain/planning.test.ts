@@ -63,13 +63,23 @@ function fixtureStaff(): Staff[] {
       team: "S2",
       qualifications: [{ type: "AP", expiryDate: "2026-12-31" }],
     },
+    {
+      staffNumber: "UNKNOWN-AP",
+      name: "Roster 未確認 AP",
+      team: "S2",
+      qualifications: [{ type: "AP", expiryDate: "2026-12-31" }],
+    },
   ];
 }
 
 function makeService() {
+  const staff = fixtureStaff();
   return new PlanningService(new InMemoryPlanningRepository({
-    staff: fixtureStaff(),
+    staff,
     roster: [
+        ...staff
+        .filter((person) => !["UNAVAILABLE-AP", "UNKNOWN-AP"].includes(person.staffNumber))
+        .map((person) => ({ date: planningDate, staffNumber: person.staffNumber, status: "night-duty" as const })),
       {
         date: planningDate,
         staffNumber: "UNAVAILABLE-AP",
@@ -182,8 +192,10 @@ describe("PlanningService Location and assignment rules", () => {
     });
     expect(candidates[0]?.qualificationUsed).toBe("CP(T)");
 
+    const cpPStaff = fixtureStaff().filter((staff) => staff.staffNumber !== "CP-T-01");
     const cpPOnly = new PlanningService({
-      staff: fixtureStaff().filter((staff) => staff.staffNumber !== "CP-T-01"),
+      staff: cpPStaff,
+      roster: cpPStaff.map((staff) => ({ date: planningDate, staffNumber: staff.staffNumber, status: "night-duty" as const })),
     }).assign(plan, {
       staffNumber: "CP-P-01",
       workId: "night-1:work-1",
@@ -265,6 +277,17 @@ describe("PlanningService Location and assignment rules", () => {
     });
     expect(unavailable.accepted).toBe(false);
     expect(unavailable.report.issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "ROSTER_UNAVAILABLE" })]),
+    );
+
+    const unknown = service.assign(plan, {
+      staffNumber: "UNKNOWN-AP",
+      workId: "night-1:work-1",
+      locationId: "loc-1",
+      role: ASSIGNMENT_ROLES.ap,
+    });
+    expect(unknown.accepted).toBe(false);
+    expect(unknown.report.issues).toEqual(
       expect.arrayContaining([expect.objectContaining({ code: "ROSTER_UNAVAILABLE" })]),
     );
   });

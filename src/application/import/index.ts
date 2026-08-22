@@ -2,3 +2,8 @@ export * from "./types";
 export * from "./hash";
 export * from "./inMemoryCommit";
 export * from "./stagingPipeline";
+export * from "./sourceArtifactRegistry";
+export * from "./reconciliation";
+export * from "./qualificationExpansion";
+export * from "./rosterResolver";
+export * from "./referenceBootstrap";

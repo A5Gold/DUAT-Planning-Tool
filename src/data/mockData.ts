@@ -89,7 +89,7 @@ export const mockPlanningData: PlanningData = {
   ],
 };
 
-const withWork = (plan: NightPlan, slot: 1 | 2 | 3 | 4, patch: Partial<Work>): NightPlan => ({
+const withWork = (plan: NightPlan, slot: 1 | 2 | 3 | 4 | 5, patch: Partial<Work>): NightPlan => ({
   ...plan,
   works: plan.works.map((work) => (work.slot === slot ? { ...work, ...patch } : work)),
 });
